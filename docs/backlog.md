@@ -84,10 +84,8 @@ experimental until a human approves them. Approved choices live in
   correction then needs its own rearm hold.
 - A monotonic clock regression discards pending confirmation and rearm
   timers and restarts from the regressed observation.
-- doctest 2.4.11 includes `<ciso646>` under clang. libstdc++ 15 warns on
-  that header in C++20, which fails `-Werror` builds. The native CI job
-  pins `ubuntu-24.04` until a doctest upgrade receives approval. Newer
-  libc++ releases used by Xcode and the NDK may warn the same way.
+- The native CI job stays pinned to `ubuntu-24.04` by human decision.
+  A move to a newer runner image needs a deliberate toolchain upgrade.
 
 ## DSP and audio rendering
 

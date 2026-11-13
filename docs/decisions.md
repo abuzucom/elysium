@@ -91,6 +91,7 @@ sequence.
 | ESP32 board | Decide at Gate 4 | Pending |
 | Temporal audit reference | Bootstrap section 8 serves as the full reference | All gates |
 | PCM block and provenance contract | v0 approved: signed 16-bit, fixed 10 ms blocks, per-block change counts, integer percent scores, one-second Dart summary. See docs/contracts/pcm-block-provenance-v0.md. | Gate 3 receiver and renderer |
-| Native test framework | doctest 2.4.11, vendored single header in native/third_party/doctest | Gate 3 onward |
+| Native test framework | doctest 2.5.3 (upgraded from 2.4.11 on 2026-11-13), vendored single header in native/third_party/doctest | Gate 3 onward |
+| Native CI runner | Pinned to ubuntu-24.04 for a reproducible toolchain | Gate 3 onward |
 | Native language standard | C++20 | Gate 3 onward |
 | Native CI | GitHub Actions job with clang and gcc sanitizer builds | Gate 3 onward |
