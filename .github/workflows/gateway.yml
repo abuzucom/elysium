@@ -43,3 +43,31 @@ jobs:
         run: go test ./...
       - name: Test with race detector
         run: go test -race ./...
+
+  livekit-integration:
+    # Runs source, ingest gateway, LiveKit, and a subscriber end to end,
+    # including the abs-capture-time forwarding check (D-009).
+    runs-on: ubuntu-24.04
+    env:
+      # Approved test server version. It is never added to gateway/go.mod.
+      LIVEKIT_SERVER_MODULE: github.com/livekit/livekit-server@v1.13.11
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: gateway/go.mod
+          cache-dependency-path: gateway/go.sum
+      - name: Build LiveKit server from the Go module proxy
+        # livekit-server uses replace directives, so go install cannot
+        # build it. Build inside a writable copy of the module source.
+        run: |
+          module_dir="$(go mod download -json "$LIVEKIT_SERVER_MODULE" | jq -r .Dir)"
+          cp -r "$module_dir" "$RUNNER_TEMP/livekit-src"
+          chmod -R u+w "$RUNNER_TEMP/livekit-src"
+          (cd "$RUNNER_TEMP/livekit-src" && go build -trimpath -o "$RUNNER_TEMP/livekit-server" ./cmd/server)
+          "$RUNNER_TEMP/livekit-server" --version
+      - name: Run LiveKit integration tests
+        working-directory: gateway
+        run: LIVEKIT_SERVER_BIN="$RUNNER_TEMP/livekit-server" go test -race -count=1 -tags livekit -v ./internal/publish/
