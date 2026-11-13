@@ -83,7 +83,10 @@ sequence.
 | Gateway and DJ-computer source language | Go | Gate 1 onward |
 | Broadcaster authentication | Mutual DTLS certificates with gateway-pinned fingerprints | Gate 1 encrypted ingest onward. Enrollment, rotation, and revocation details remain deferred. |
 | Local LiveKit server for tests | Build a pinned tagged release from source through the Go module proxy. Bind to 127.0.0.1 with test-only keys. | Gate 1 integration tests |
-| Gate 1 Go dependencies | Re-confirm at Gate 1 with exact pinned versions | Pending |
+| Gate 1 ingest dependencies | pion/dtls/v3 v3.1.15, pion/srtp/v3 v3.1.3, pion/rtp v1.10.6 | Gate 1 step 1 onward |
+| Gate 1 publishing dependencies | livekit/server-sdk-go/v2 v2.19.0 with pion/webrtc/v4 v4.2.26 | Gate 1 step 2 onward |
+| Gateway Go version | go 1.26.8 in gateway/go.mod | Gate 1 onward |
+| LiveKit test server version | livekit-server v1.13.11 built from source, outside gateway/go.mod | Gate 1 integration tests |
 | Mobile and native build infrastructure | Decide at Gate 3 | Pending |
 | ESP32 board | Decide at Gate 4 | Pending |
 | Temporal audit reference | Bootstrap section 8 serves as the full reference | All gates |

@@ -29,6 +29,21 @@ experimental until a human approves them. Approved choices live in
   acts as the RTP sender toward LiveKit. The D-010 mapping of source
   capture time to venue UTC determines the field values.
 
+## Gateway ingest (experimental configuration)
+
+- Handshake timeout, maximum concurrent sources, and per-session RTP queue
+  depth. The `ingest` package takes them as caller configuration with no
+  default values.
+- Per-peer DTLS datagram queue depth of 64 and SRTP replay window of 64
+  packets. Both live as package constants.
+- SRTP protection profile order: AEAD_AES_128_GCM first, then
+  AES128_CM_HMAC_SHA1_80 as a fallback for constrained broadcasters.
+- Handshake slot exhaustion. Any address can hold one of the limited
+  source slots until the handshake timeout. Rate limiting and network
+  segmentation (VLAN 20) remain open.
+- SRTCP from sources is dropped. Sender reports and feedback handling
+  remain open.
+
 ## DSP and audio rendering
 
 - WSOLA window and search parameters.

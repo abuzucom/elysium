@@ -1,3 +1,18 @@
 module github.com/abuzucom/elysium/gateway
 
-go 1.24
+go 1.26.8
+
+require (
+	github.com/pion/dtls/v3 v3.1.15
+	github.com/pion/rtp v1.10.6
+	github.com/pion/srtp/v3 v3.1.3
+)
+
+require (
+	github.com/pion/logging v0.2.4 // indirect
+	github.com/pion/randutil v0.1.0 // indirect
+	github.com/pion/rtcp v1.2.19 // indirect
+	github.com/pion/transport/v5 v5.1.1 // indirect
+	golang.org/x/crypto v0.48.0 // indirect
+	golang.org/x/sys v0.41.0 // indirect
+)

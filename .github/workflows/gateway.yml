@@ -28,8 +28,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: gateway/go.mod
-          # The module has no dependencies and no go.sum to key a cache on.
-          cache: false
+          cache-dependency-path: gateway/go.sum
       - name: Check formatting
         run: |
           unformatted="$(gofmt -l .)"
