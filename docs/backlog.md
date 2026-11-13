@@ -102,6 +102,23 @@ experimental until a human approves them. Approved choices live in
   native build infrastructure. The C++ definition and validation exist
   in `native/include/elysium/pcm/v0/block.hpp`.
 
+## WSOLA prototype (experimental configuration and findings)
+
+- Window 960 frames (20 ms), hop 480 frames, search +/-240 frames
+  (5 ms), periodic Hann window, mono-mix normalized cross-correlation.
+  All remain experimental values.
+- Allowed speeds: exactly 1.00, or 1.01 to 1.05 (D-025). The stretcher
+  rejects other values and keeps its current speed.
+- The stretcher buffers 16 to 24 ms of input in steady state and 30 ms
+  before first output. Bypass at normal speed with a crossfade into
+  stretching remains a design question against the 80 ms target
+  (D-022).
+- At 1.03 the click test lost 2 of 100 transients. Transient-aware
+  segment selection remains open.
+- Speed changes apply at the next segment without a crossfade. The
+  audible effect of a speed step remains unmeasured.
+- See `docs/poc/wsola-offline-2026-11-13.md` for the measurements.
+
 ## DSP and audio rendering
 
 - WSOLA window and search parameters.
