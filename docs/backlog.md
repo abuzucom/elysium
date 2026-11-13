@@ -74,6 +74,17 @@ experimental until a human approves them. Approved choices live in
   network delay estimation, remain open.
 - GPS and NTP adapters and RouterOS feasibility remain open.
 
+## Native lag detection (experimental behavior)
+
+- Threshold equality is caller configuration in `ThresholdEquality`. The
+  D-021 equality decision remains deferred.
+- A condition counts as continuous between consecutive observations that
+  each meet it. Observation cadence follows the 10 ms playout pull.
+- Major recovery disarms gradual correction when it fires. Gradual
+  correction then needs its own rearm hold.
+- A monotonic clock regression discards pending confirmation and rearm
+  timers and restarts from the regressed observation.
+
 ## DSP and audio rendering
 
 - WSOLA window and search parameters.
