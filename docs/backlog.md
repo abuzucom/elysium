@@ -87,6 +87,21 @@ experimental until a human approves them. Approved choices live in
 - The native CI job stays pinned to `ubuntu-24.04` by human decision.
   A move to a newer runner image needs a deliberate toolchain upgrade.
 
+## Native timeline accounting (experimental behavior)
+
+- Source frames per block equal output frames minus inserted, concealed,
+  comfort noise, and SFU synthetic frames, plus removed frames. The
+  categories count as disjoint. Whether NetEq expand overlaps
+  concealment needs confirmation against the libwebrtc patch (D-016).
+- A new stream epoch or a declared discontinuity restarts source
+  position prediction. Any other mismatch reports a source jump.
+- Contract validation also requires venue mapping to imply capture time,
+  holdover to imply venue mapping, and synthetic frame counts to imply
+  the synthetic flag.
+- The receiver and renderer sides of the contract still wait for Gate 3
+  native build infrastructure. The C++ definition and validation exist
+  in `native/include/elysium/pcm/v0/block.hpp`.
+
 ## DSP and audio rendering
 
 - WSOLA window and search parameters.
