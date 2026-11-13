@@ -33,6 +33,7 @@ import (
 	"github.com/pion/webrtc/v4"
 
 	"github.com/abuzucom/elysium/gateway/internal/ingest"
+	"github.com/abuzucom/elysium/gateway/internal/rtptime"
 )
 
 // Test-only values. They are not approved production values.
@@ -46,6 +47,16 @@ const (
 	itReceiveTimeout   = 10 * time.Second
 	itRoomName         = "elysium-it"
 	itTrackName        = "program"
+	// itSourceACTID is the one-byte header extension ID the test source
+	// uses for abs-capture-time. The value 14 is unlikely to match the
+	// ID negotiated with LiveKit, so the test exercises ID translation.
+	itSourceACTID = 14
+	// itCaptureBaseQ32 is an arbitrary NTP Q32.32 capture instant.
+	itCaptureBaseQ32 = uint64(0xe8a1b2c3) << 32
+	// itFrameQ32 is 10 ms in Q32.32 seconds, truncated.
+	itFrameQ32 = (uint64(1) << 32) / 100
+	// itClockOffsetQ32 is -0.25 s in signed Q32.32.
+	itClockOffsetQ32 = -(int64(1) << 30)
 )
 
 type testServer struct {
@@ -194,13 +205,18 @@ func startIngest(t *testing.T) (*ingest.Source, *ingest.Session) {
 }
 
 // subscribe joins as a listener and returns the first subscribed track.
-func subscribe(t *testing.T, server testServer) *webrtc.TrackRemote {
+type subscription struct {
+	track       *webrtc.TrackRemote
+	publication *lksdk.RemoteTrackPublication
+}
+
+func subscribe(t *testing.T, server testServer) subscription {
 	t.Helper()
-	tracks := make(chan *webrtc.TrackRemote, 1)
+	tracks := make(chan subscription, 1)
 	callback := lksdk.NewRoomCallback()
-	callback.OnTrackSubscribed = func(track *webrtc.TrackRemote, _ *lksdk.RemoteTrackPublication, _ *lksdk.RemoteParticipant) {
+	callback.OnTrackSubscribed = func(track *webrtc.TrackRemote, publication *lksdk.RemoteTrackPublication, _ *lksdk.RemoteParticipant) {
 		select {
-		case tracks <- track:
+		case tracks <- subscription{track: track, publication: publication}:
 		default:
 		}
 	}
@@ -215,11 +231,11 @@ func subscribe(t *testing.T, server testServer) *webrtc.TrackRemote {
 	}
 	t.Cleanup(room.Disconnect)
 	select {
-	case track := <-tracks:
-		return track
+	case sub := <-tracks:
+		return sub
 	case <-time.After(itSubscribeTimeout):
 		t.Fatalf("no track subscribed within %v", itSubscribeTimeout)
-		return nil
+		return subscription{}
 	}
 }
 
@@ -232,7 +248,18 @@ func indexedPayload(index int) []byte {
 	return payload
 }
 
-func sendPaced(source *ingest.Source) error {
+// testCaptureTime returns the synthetic capture time of packet index.
+func testCaptureTime(index int) rtptime.AbsCaptureTime {
+	return rtptime.AbsCaptureTime{
+		CaptureTimestamp:               itCaptureBaseQ32 + uint64(index)*itFrameQ32,
+		EstimatedCaptureClockOffset:    itClockOffsetQ32,
+		HasEstimatedCaptureClockOffset: true,
+	}
+}
+
+// sendPaced sends one packet per 10 ms. A nonzero actID attaches the
+// abs-capture-time extension under that one-byte extension ID.
+func sendPaced(source *ingest.Source, actID uint8) error {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for i := 0; i < itPacketCount; i++ {
@@ -246,6 +273,15 @@ func sendPaced(source *ingest.Source) error {
 				SSRC:           0x5eed1234,
 			},
 			Payload: indexedPayload(i),
+		}
+		if actID != 0 {
+			act, err := testCaptureTime(i).MarshalBinary()
+			if err != nil {
+				return fmt.Errorf("marshal ACT packet %d: %w", i, err)
+			}
+			if err := packet.SetExtension(actID, act); err != nil {
+				return fmt.Errorf("set ACT packet %d: %w", i, err)
+			}
 		}
 		if err := source.WriteRTP(packet); err != nil {
 			return fmt.Errorf("WriteRTP() packet %d: %w", i, err)
@@ -264,10 +300,13 @@ type receivedPacket struct {
 	index     int
 	timestamp uint32
 	payload   []byte
+	act       []byte
 	synthetic bool
 }
 
-func receive(t *testing.T, track *webrtc.TrackRemote, count int) []receivedPacket {
+// receive collects count program packets. A nonzero actID records the
+// abs-capture-time extension under the subscriber's negotiated ID.
+func receive(t *testing.T, track *webrtc.TrackRemote, actID uint8, count int) []receivedPacket {
 	t.Helper()
 	packets := make(chan receivedPacket, count)
 	stop := make(chan struct{})
@@ -284,6 +323,9 @@ func receive(t *testing.T, track *webrtc.TrackRemote, count int) []receivedPacke
 				timestamp: packet.Timestamp,
 				payload:   append([]byte(nil), packet.Payload...),
 				synthetic: bytes.HasPrefix(packet.Payload, sfuSilencePrefix),
+			}
+			if actID != 0 {
+				received.act = append([]byte(nil), packet.GetExtension(actID)...)
 			}
 			if !received.synthetic && len(packet.Payload) >= 4 {
 				received.index = int(binary.BigEndian.Uint32(packet.Payload))
@@ -317,17 +359,19 @@ func receive(t *testing.T, track *webrtc.TrackRemote, count int) []receivedPacke
 	return program
 }
 
-func TestPublisherDeliversIngestPayloadsToSubscriber(t *testing.T) {
+// startPipeline runs source, ingest gateway, publisher, LiveKit, and a
+// subscriber. It returns the source and the subscription.
+func startPipeline(t *testing.T, cfg Config) (*ingest.Source, subscription) {
+	t.Helper()
 	server := startLiveKit(t)
 	source, session := startIngest(t)
-	publisher, err := Connect(Config{
-		URL:       server.url,
-		APIKey:    server.apiKey,
-		APISecret: server.apiSecret,
-		RoomName:  itRoomName,
-		Identity:  "gateway",
-		TrackName: itTrackName,
-	})
+	cfg.URL = server.url
+	cfg.APIKey = server.apiKey
+	cfg.APISecret = server.apiSecret
+	cfg.RoomName = itRoomName
+	cfg.Identity = "gateway"
+	cfg.TrackName = itTrackName
+	publisher, err := Connect(cfg)
 	if err != nil {
 		t.Fatalf("Connect() error = %v", err)
 	}
@@ -339,16 +383,27 @@ func TestPublisherDeliversIngestPayloadsToSubscriber(t *testing.T) {
 		cancel()
 		<-forwardDone
 	})
-	track := subscribe(t, server)
+	return source, subscribe(t, server)
+}
 
+// sendAndReceive sends the paced program and collects it at the
+// subscriber.
+func sendAndReceive(t *testing.T, source *ingest.Source, sub subscription, sourceACTID, subscriberACTID uint8) []receivedPacket {
+	t.Helper()
 	sendDone := make(chan error, 1)
-	go func() { sendDone <- sendPaced(source) }()
-	received := receive(t, track, itPacketCount)
+	go func() { sendDone <- sendPaced(source, sourceACTID) }()
+	received := receive(t, sub.track, subscriberACTID, itPacketCount)
 	if err := <-sendDone; err != nil {
 		t.Fatalf("sendPaced() error = %v", err)
 	}
+	return received
+}
 
-	if codec := track.Codec(); codec.Channels != 2 || !strings.Contains(codec.SDPFmtpLine, "stereo=1") {
+func TestPublisherDeliversIngestPayloadsToSubscriber(t *testing.T) {
+	source, sub := startPipeline(t, Config{})
+	received := sendAndReceive(t, source, sub, 0, 0)
+
+	if codec := sub.track.Codec(); codec.Channels != 2 || !strings.Contains(codec.SDPFmtpLine, "stereo=1") {
 		t.Errorf("subscriber codec = %+v, want stereo Opus", codec.RTPCodecCapability)
 	}
 	sentHash, receivedHash := sha256.New(), sha256.New()
@@ -368,5 +423,43 @@ func TestPublisherDeliversIngestPayloadsToSubscriber(t *testing.T) {
 	}
 	if !bytes.Equal(sentHash.Sum(nil), receivedHash.Sum(nil)) {
 		t.Error("payload SHA-256 differs between source and subscriber")
+	}
+}
+
+// negotiatedACTID returns the subscriber's abs-capture-time extension ID,
+// or zero when the subscriber did not negotiate it.
+func negotiatedACTID(sub subscription) uint8 {
+	for _, extension := range sub.publication.Receiver().GetParameters().HeaderExtensions {
+		if extension.URI == rtptime.AbsCaptureTimeURI {
+			return uint8(extension.ID)
+		}
+	}
+	return 0
+}
+
+// TestPublisherForwardsAbsCaptureTimeToSubscriber is the Gate 2 ACT
+// feasibility check (D-009). LiveKit passes the publisher capture time
+// through unchanged unless sender report pass-through is disabled.
+func TestPublisherForwardsAbsCaptureTimeToSubscriber(t *testing.T) {
+	source, sub := startPipeline(t, Config{SourceACTExtensionID: itSourceACTID})
+	subscriberACTID := negotiatedACTID(sub)
+	if subscriberACTID == 0 {
+		t.Fatal("subscriber did not negotiate abs-capture-time")
+	}
+	t.Logf("source ACT ID %d, subscriber ACT ID %d", itSourceACTID, subscriberACTID)
+
+	received := sendAndReceive(t, source, sub, itSourceACTID, subscriberACTID)
+
+	for i, packet := range received {
+		if packet.index != i {
+			t.Fatalf("packet %d carries index %d, want in-order delivery", i, packet.index)
+		}
+		want, err := testCaptureTime(i).MarshalBinary()
+		if err != nil {
+			t.Fatalf("MarshalBinary() error = %v", err)
+		}
+		if !bytes.Equal(packet.act, want) {
+			t.Fatalf("packet %d ACT = % x, want % x", i, packet.act, want)
+		}
 	}
 }

@@ -15,6 +15,13 @@ import (
 	"github.com/abuzucom/elysium/gateway/internal/ingest"
 )
 
+// One-byte RTP header extension IDs run from 1 to 14. ID 15 is reserved
+// (RFC 8285 section 4.2).
+const (
+	minOneByteExtensionID = 1
+	maxOneByteExtensionID = 14
+)
+
 // ErrInvalidConfig reports an unusable publisher configuration.
 var ErrInvalidConfig = errors.New("publish: invalid configuration")
 
@@ -68,6 +75,9 @@ type Config struct {
 	Identity string
 	// TrackName labels the published program track.
 	TrackName string
+	// SourceACTExtensionID is the one-byte header extension ID the source
+	// uses for abs-capture-time. Zero means the source sends none.
+	SourceACTExtensionID uint8
 }
 
 func (cfg Config) validate() error {
@@ -85,6 +95,10 @@ func (cfg Config) validate() error {
 		return fmt.Errorf("%w: participant identity required", ErrInvalidConfig)
 	case cfg.TrackName == "":
 		return fmt.Errorf("%w: track name required", ErrInvalidConfig)
+	case cfg.SourceACTExtensionID != 0 &&
+		(cfg.SourceACTExtensionID < minOneByteExtensionID || cfg.SourceACTExtensionID > maxOneByteExtensionID):
+		return fmt.Errorf("%w: ACT extension ID must be %d to %d", ErrInvalidConfig,
+			minOneByteExtensionID, maxOneByteExtensionID)
 	}
 	return nil
 }
@@ -92,7 +106,7 @@ func (cfg Config) validate() error {
 // Publisher publishes one stereo Opus program track into a LiveKit room.
 type Publisher struct {
 	room  *lksdk.Room
-	track *webrtc.TrackLocalStaticRTP
+	track *lksdk.LocalTrack
 }
 
 // Connect joins the room as the gateway participant and publishes the
@@ -101,9 +115,14 @@ func Connect(cfg Config) (*Publisher, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	track, err := webrtc.NewTrackLocalStaticRTP(opusStereoCodec, cfg.TrackName, cfg.Identity)
+	track, err := lksdk.NewLocalTrack(opusStereoCodec)
 	if err != nil {
 		return nil, fmt.Errorf("publish: create track: %w", err)
+	}
+	if cfg.SourceACTExtensionID != 0 {
+		// The SDK moves abs-capture-time from the source ID to the ID
+		// negotiated with LiveKit. The extension bytes stay unchanged.
+		track.SetIncomingAbsCaptureTimeExtensionID(cfg.SourceACTExtensionID)
 	}
 	room, err := lksdk.ConnectToRoom(cfg.URL, lksdk.ConnectInfo{
 		APIKey:              cfg.APIKey,
@@ -126,11 +145,11 @@ func Connect(cfg Config) (*Publisher, error) {
 	return &Publisher{room: room, track: track}, nil
 }
 
-// WriteRTP forwards one packet. The payload, sequence number, and
-// timestamp pass through unchanged. The track binding sets the
-// negotiated SSRC and payload type.
+// WriteRTP forwards one packet. The payload, sequence number,
+// timestamp, and abs-capture-time bytes pass through unchanged. The track
+// binding sets the negotiated SSRC, payload type, and extension ID.
 func (p *Publisher) WriteRTP(packet *rtp.Packet) error {
-	return p.track.WriteRTP(packet)
+	return p.track.WriteRTP(packet, nil)
 }
 
 // Close leaves the room.

@@ -68,9 +68,16 @@ experimental until a human approves them. Approved choices live in
 
 These Gate 0 findings remain unverified.
 
-- LiveKit server configuration determines the negotiated audio header
-  extensions. ACT forwarding on audio subscriber tracks requires
-  verification at the pinned version.
+- Resolved at Gate 1 step 3 for a Go subscriber: LiveKit v1.13.11
+  negotiates abs-capture-time on audio in both directions and forwards it
+  byte-identical, signed clock offset included. The source used extension
+  ID 14. The subscriber negotiated ID 2. The publisher translates the ID
+  through the SDK LocalTrack.
+- LiveKit rewrites abs-capture-time to the SFU clock and drops the clock
+  offset when a subscriber has sender report pass-through disabled. The
+  default keeps pass-through. Venue deployment configuration must keep it.
+- The abs-capture-time content of SFU-injected silence frames is
+  unverified.
 - LiveKit may rewrite RTP sequence numbers and timestamps per subscriber.
   Receiver sample positions must therefore derive from ACT rather than
   raw RTP timestamps.

@@ -119,6 +119,8 @@ func TestConnectRejectsInvalidConfig(t *testing.T) {
 		{"missing room", func(c *Config) { c.RoomName = "" }},
 		{"missing identity", func(c *Config) { c.Identity = "" }},
 		{"missing track name", func(c *Config) { c.TrackName = "" }},
+		{"ACT extension ID 15 reserved", func(c *Config) { c.SourceACTExtensionID = 15 }},
+		{"ACT extension ID beyond one-byte range", func(c *Config) { c.SourceACTExtensionID = 200 }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
