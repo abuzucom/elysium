@@ -57,6 +57,25 @@ experimental until a human approves them. Approved choices live in
   `LIVEKIT_SERVER_BIN` path. CI does not build the server or run it.
 - Publisher reconnection after a LiveKit restart remains open.
 
+## Venue time and sample mapping (experimental configuration)
+
+- Fresh limit, holdover limit, maximum oscillator drift, and step
+  threshold for the venue time service. The `venuetime` package takes
+  them as caller configuration with no default values.
+- Source priority: GPS above NTP. NTP may replace GPS only after GPS
+  leaves the fresh window. A correction beyond the step threshold starts
+  a new venue epoch instead of silently rewriting the timeline.
+- Small corrections within the step threshold apply immediately. Slewing
+  remains open.
+- Sample mapping uses the nominal sample rate from the latest anchor.
+  Source clock rate estimation remains open. Uncertainty grows with the
+  configured source drift bound.
+- Anchor derivation from abs-capture-time and gateway receive time, and
+  network delay estimation, remain open.
+- GPS and NTP adapters and RouterOS feasibility remain open.
+- The PCM block and provenance contract v0 in
+  `docs/contracts/pcm-block-provenance-v0.md` awaits approval.
+
 ## DSP and audio rendering
 
 - WSOLA window and search parameters.
