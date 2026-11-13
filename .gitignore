@@ -4,9 +4,12 @@ __pycache__/
 *$py.class
 
 # C extensions
-*.so
+# The Python template pattern *.so is omitted. Android builds may vendor
+# prebuilt native libraries (for example a patched libwebrtc) as .so files.
 
 # Distribution / packaging
+# The Python template pattern lib/ is omitted. Flutter keeps all Dart
+# sources in lib/.
 .Python
 build/
 develop-eggs/
@@ -14,7 +17,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
 parts/
 sdist/
