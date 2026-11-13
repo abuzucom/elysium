@@ -1,0 +1,84 @@
+# Deferred decision backlog
+
+Items here carry no approval. Experimental values stay labeled as
+experimental until a human approves them. Approved choices live in
+`docs/decisions.md`.
+
+## Timing and synchronization
+
+- Timing score event classifications, score recovery timing and evidence,
+  effective sample-count formula, and baseline adjustment-rate limits.
+- Minor timing-interruption classification, event deduplication, and
+  overlap semantics.
+- Exact threshold equality and uncertainty hysteresis semantics for D-021.
+- Precise cooldown adaptation for D-029.
+- Epoch re-anchoring semantics.
+
+## Gateway RTP timing (experimental configuration)
+
+- RTP timestamp reorder window. The `rtptime` package takes it as caller
+  configuration with no default value.
+- Forward jump limit that opens a new stream epoch. The `rtptime` package
+  takes it as caller configuration with no default value.
+- Boundary semantics. The `rtptime` package keeps the current epoch for a
+  forward jump equal to the limit. It treats a backward step equal to the
+  reorder window as a late packet.
+- Treatment of repeated RTP timestamps such as duplicates and
+  retransmissions.
+- Gateway values for the abs-capture-time clock offset field. The gateway
+  acts as the RTP sender toward LiveKit. The D-010 mapping of source
+  capture time to venue UTC determines the field values.
+
+## DSP and audio rendering
+
+- WSOLA window and search parameters.
+- DSP audio transitions.
+- Fade and unmute behavior.
+- User notification.
+
+## WebRTC and LiveKit feasibility
+
+These Gate 0 findings remain unverified.
+
+- LiveKit server configuration determines the negotiated audio header
+  extensions. ACT forwarding on audio subscriber tracks requires
+  verification at the pinned version.
+- LiveKit may rewrite RTP sequence numbers and timestamps per subscriber.
+  Receiver sample positions must therefore derive from ACT rather than
+  raw RTP timestamps.
+- libwebrtc receivers may leave abs-capture-time disabled in default
+  negotiation. A client-side change may precede the D-016 patch.
+- libwebrtc delivers decoded audio only when the audio device module pulls
+  playout data. The native renderer likely needs a custom audio device
+  module that drives the 10 ms pull from its own output clock. This
+  finding affects the scope of D-012, D-013, and D-016.
+- `AudioTrackSinkInterface::OnData` exposes capture time in milliseconds
+  only. Millisecond precision alone does not satisfy D-018 provenance.
+- Native WebRTC patch and version feasibility.
+
+## Security and admission
+
+- Security token lifetimes and enrollment specifics.
+- Offline admission expiry under venue clock failure.
+- Broadcaster certificate enrollment, rotation, and revocation procedure.
+
+## Calendar and scheduling
+
+- Event scheduling gap and overlap rules for recurring local-time
+  schedules.
+
+## Hardware and deployment
+
+- ESP32 board, audio ADC, and firmware capacity.
+- Access point capacity and later deployment assumptions.
+- Mobile and native build infrastructure: a macOS host, the Android NDK, a
+  libwebrtc build host, and test phones.
+
+## Documentation
+
+- The source handoff named the product "Quiet Disco" in section 8. The
+  committed `docs/bootstrap.md` normalizes that reference to Project
+  Elysium by human decision.
+- The handoff cites a temporal audit checklist with categories C1 to C26.
+  The checklist text never arrived. Bootstrap section 8 serves as the full
+  reference by human decision.
