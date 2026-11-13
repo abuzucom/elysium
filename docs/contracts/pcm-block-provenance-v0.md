@@ -1,7 +1,8 @@
 # PCM block and provenance contract, version 0
 
-Status: Draft proposal. Not approved. Gate 2 requires human approval
-before any implementation of this cross-language interface.
+Status: Approved v0 by the active human on 2026-11-13. Implementation
+waits for Gate 3 native build infrastructure. Any change to this
+interface requires new approval.
 
 ## Purpose
 
@@ -47,6 +48,10 @@ enum BlockFlag : uint32_t {
   kOutOfOrder            = 1u << 8,  // decode order differs from capture order
 };
 
+// Every block holds exactly 10 ms: 480 frames at 48 kHz, matching the
+// libwebrtc playout pull.
+constexpr uint32_t kFramesPerBlock = 480;
+
 struct BlockHeader {
   uint16_t major_version;        // kMajorVersion
   uint16_t minor_version;        // kMinorVersion
@@ -64,7 +69,7 @@ struct BlockHeader {
   uint32_t sample_rate_hz;       // 48000 for the program feed
   uint16_t channels;             // 2 for the program feed
   uint16_t reserved0;            // zero
-  uint32_t frame_count;          // PCM frames in the block
+  uint32_t frame_count;          // always kFramesPerBlock; receivers reject others
   uint32_t reserved1;            // zero
 };
 
@@ -97,7 +102,8 @@ struct Provenance {
 };
 
 // One logical block (D-017). The PCM buffer holds frame_count * channels
-// interleaved signed 16-bit samples. The receiver owns the buffer until
+// interleaved signed 16-bit samples as libwebrtc delivers them. The
+// renderer converts to float internally where WSOLA needs it. The receiver owns the buffer until
 // the renderer releases it.
 struct PcmBlock {
   Provenance provenance;
@@ -132,14 +138,22 @@ struct PcmBlock {
   buffer by pointer or direct `ByteBuffer`. Neither bridge copies PCM.
 - A compile-time `static_assert` fixes `sizeof(Provenance)` per version.
 
-## Open questions for approval
+## Flutter diagnostics
 
-1. Sample format: signed 16-bit as libwebrtc delivers, or 32-bit float
-   for the renderer. The draft keeps signed 16-bit to avoid conversion in
-   the receiver.
-2. Block size: libwebrtc pulls 10 ms (480 frames). The draft allows any
-   `frame_count`. A fixed size would simplify the renderer.
-3. Per-frame provenance: the draft carries per-block counts. Per-frame
-   change ranges would locate each inserted or removed span exactly.
-4. Score encoding: the draft encodes D-051 values as integer percent.
-5. Diagnostics: the subset of fields exposed to Dart for display.
+Dart never receives PCM or per-block provenance. Once per second the
+native layer sends Dart a rolling summary over the platform bridge:
+
+- current capture-to-output latency estimate and its uncertainty
+- minimum stage score over the last second
+- recovery state (normal, gradual correction, major recovery, degraded)
+- counts of synthetic, inserted, and removed frames over the last second
+
+## Resolved decisions (2026-11-13)
+
+| Question | Decision |
+| --- | --- |
+| Sample format | Interleaved signed 16-bit, as libwebrtc delivers |
+| Block size | Fixed 10 ms, 480 frames at 48 kHz |
+| Sample change detail | Per-block counts per category |
+| Score encoding | Integer percent: 100, 75, 50, 25, and 0 for invalid |
+| Dart diagnostics | Rolling one-second summary only |

@@ -73,8 +73,6 @@ experimental until a human approves them. Approved choices live in
 - Anchor derivation from abs-capture-time and gateway receive time, and
   network delay estimation, remain open.
 - GPS and NTP adapters and RouterOS feasibility remain open.
-- The PCM block and provenance contract v0 in
-  `docs/contracts/pcm-block-provenance-v0.md` awaits approval.
 
 ## DSP and audio rendering
 

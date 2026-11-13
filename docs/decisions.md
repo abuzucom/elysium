@@ -90,3 +90,4 @@ sequence.
 | Mobile and native build infrastructure | Decide at Gate 3 | Pending |
 | ESP32 board | Decide at Gate 4 | Pending |
 | Temporal audit reference | Bootstrap section 8 serves as the full reference | All gates |
+| PCM block and provenance contract | v0 approved: signed 16-bit, fixed 10 ms blocks, per-block change counts, integer percent scores, one-second Dart summary. See docs/contracts/pcm-block-provenance-v0.md. | Gate 3 receiver and renderer |
