@@ -44,6 +44,19 @@ experimental until a human approves them. Approved choices live in
 - SRTCP from sources is dropped. Sender reports and feedback handling
   remain open.
 
+## Gateway publishing (Gate 1 step 2 findings)
+
+- The LiveKit v1.13.11 SFU injects Opus silence frames on a downtrack when
+  a subscriber attaches before media flows, on publisher mute, and on
+  close (`pkg/sfu/downtrack.go`). The integration test observed 2 such
+  frames before the program started. D-018 provenance must mark them as
+  synthetic audio. The receiver needs a rule to detect them.
+- The published track carries no LiveKit track source. Setting one needs
+  a direct `livekit/protocol` import, which awaits dependency approval.
+- The LiveKit integration test runs only with `-tags livekit` and a
+  `LIVEKIT_SERVER_BIN` path. CI does not build the server or run it.
+- Publisher reconnection after a LiveKit restart remains open.
+
 ## DSP and audio rendering
 
 - WSOLA window and search parameters.
