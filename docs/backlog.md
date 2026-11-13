@@ -73,8 +73,21 @@ experimental until a human approves them. Approved choices live in
 - Anchor derivation from abs-capture-time and gateway receive time, and
   network delay estimation, remain open.
 - GPS and NTP adapters and RouterOS feasibility remain open.
-- The PCM block and provenance contract v0 in
-  `docs/contracts/pcm-block-provenance-v0.md` awaits approval.
+
+## Native lag detection (experimental behavior)
+
+- Threshold equality is caller configuration in `ThresholdEquality`. The
+  D-021 equality decision remains deferred.
+- A condition counts as continuous between consecutive observations that
+  each meet it. Observation cadence follows the 10 ms playout pull.
+- Major recovery disarms gradual correction when it fires. Gradual
+  correction then needs its own rearm hold.
+- A monotonic clock regression discards pending confirmation and rearm
+  timers and restarts from the regressed observation.
+- doctest 2.4.11 includes `<ciso646>` under clang. libstdc++ 15 warns on
+  that header in C++20, which fails `-Werror` builds. The native CI job
+  pins `ubuntu-24.04` until a doctest upgrade receives approval. Newer
+  libc++ releases used by Xcode and the NDK may warn the same way.
 
 ## DSP and audio rendering
 

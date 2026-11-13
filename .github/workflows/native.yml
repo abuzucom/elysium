@@ -1,0 +1,47 @@
+name: native
+
+on:
+  pull_request:
+    paths:
+      - "native/**"
+      - ".github/workflows/native.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "native/**"
+      - ".github/workflows/native.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  native-tests:
+    # Pinned to the toolchain verified with doctest 2.4.11 (clang 18,
+    # libstdc++ 13). Newer libstdc++ warns on <ciso646>, which doctest
+    # 2.4.11 includes under clang, and -Werror fails the build.
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: clang
+            cxx: clang++
+            flags: ""
+          - name: gcc-sanitizers
+            cxx: g++
+            flags: "-fsanitize=address,undefined -fno-omit-frame-pointer"
+    name: native-tests (${{ matrix.name }})
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Configure
+        run: >
+          cmake -S native -B build
+          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          -DCMAKE_CXX_FLAGS="${{ matrix.flags }}"
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
