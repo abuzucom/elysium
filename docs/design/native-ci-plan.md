@@ -1,7 +1,8 @@
 # Hosted native build CI plan, 2026-11-14
 
-Status: Draft plan for approval. No workflow exists yet. Each workflow
-below needs its own approval because it uses paid runner minutes.
+Status: Approved by the active human on 2026-11-14 with the resolved
+decisions below. No workflow exists yet. Each workflow and pinned tool
+version still gets confirmed when it lands.
 
 ## Goal
 
@@ -111,14 +112,14 @@ storage or a self-hosted build machine.
 - Billed cost per pull request at the reported rates: about $0.06 +
   $0.93 = about $1.00 **[derived]**, only where minutes are billed.
 
-## Decisions requested
+## Resolved decisions (2026-11-14)
 
-1. Approve Phase A with prebuilt, unpatched WebRTC, or wait for patched
-   builds.
-2. Choose the Phase B build host: larger hosted runners or a self-hosted
-   machine.
-3. Set a monthly Actions budget or minute cap.
-4. Approve tool versions (Flutter, NDK, Xcode) when Phase A starts.
+| Decision | Outcome |
+| --- | --- |
+| Phase A | Approved: C++ core on Android and iOS runners, then a Flutter shell with prebuilt, unpatched WebRTC |
+| Phase B build host | Decide later, after Phase A runs |
+| Actions budget | The human manages spending limits in GitHub billing. Native jobs stay path-filtered |
+| Tool versions | Pinned Flutter, NDK, Xcode, and prebuilt WebRTC versions get presented for approval when Phase A starts |
 
 ## Sources
 
