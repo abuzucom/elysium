@@ -2,11 +2,13 @@
 
 #include <doctest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <numbers>
 #include <optional>
+#include <utility>
 #include <vector>
 
 using elysium::dsp::IsAllowedSpeedPpm;
@@ -202,4 +204,112 @@ TEST_CASE("create rejects invalid configuration") {
   SUBCASE("zero push size") { config.max_push_frames = 0; }
 
   CHECK_FALSE(Wsola::Create(config).has_value());
+}
+
+namespace {
+
+// Streams input in 10 ms blocks with a speed change before each phase.
+// Returns all output and records removed_frames after every block.
+struct PhasedRun {
+  std::vector<float> input;
+  std::vector<float> output;
+  std::vector<uint64_t> removed_history;
+};
+
+PhasedRun RunPhases(Wsola& wsola, const std::vector<std::pair<uint32_t, size_t>>& phases) {
+  PhasedRun run;
+  size_t total = 0;
+  for (const auto& phase : phases) {
+    total += phase.second;
+  }
+  run.input = StereoSine(440.0, total, false);
+  std::vector<float> pulled(4 * kBlockFrames * kStereo);
+  size_t start = 0;
+  for (const auto& [speed, frames] : phases) {
+    REQUIRE(wsola.SetSpeedPpm(speed));
+    for (size_t end = start + frames; start < end; start += kBlockFrames) {
+      const size_t count = std::min<size_t>(kBlockFrames, end - start);
+      const std::span<const float> block(run.input.data() + start * kStereo, count * kStereo);
+      REQUIRE(wsola.Push(block) == count);
+      size_t got = 0;
+      while ((got = wsola.Pull(pulled)) > 0) {
+        run.output.insert(run.output.end(), pulled.begin(), pulled.begin() + static_cast<std::ptrdiff_t>(got * kStereo));
+      }
+      run.removed_history.push_back(wsola.removed_frames());
+    }
+  }
+  return run;
+}
+
+// Largest change between consecutive left-channel samples.
+float MaxStep(const std::vector<float>& samples) {
+  float max_step = 0.0f;
+  for (size_t i = kStereo; i < samples.size(); i += kStereo) {
+    max_step = std::max(max_step, std::fabs(samples[i] - samples[i - kStereo]));
+  }
+  return max_step;
+}
+
+}  // namespace
+
+TEST_CASE("normal speed passes input through without delay") {
+  Wsola wsola = MakeWsola(1'000'000);
+  const std::vector<float> input = StereoSine(440.0, kBlockFrames, false);
+  std::vector<float> pulled(kBlockFrames * kStereo);
+
+  REQUIRE(wsola.Push(input) == kBlockFrames);
+  const size_t got = wsola.Pull(pulled);
+
+  CHECK(got == kBlockFrames);
+  CHECK(pulled == input);
+  CHECK(wsola.consumed_input_frames() == kBlockFrames);
+}
+
+TEST_CASE("lookahead covers one window plus the search range") {
+  Wsola wsola = MakeWsola(1'000'000);
+
+  CHECK(wsola.lookahead_frames() == TestConfig().window_frames + TestConfig().search_frames);
+}
+
+TEST_CASE("entering and leaving acceleration keeps the waveform continuous") {
+  Wsola wsola = MakeWsola(1'000'000);
+
+  PhasedRun run = RunPhases(wsola, {{1'000'000, kRate / 2}, {1'050'000, kRate}, {1'000'000, kRate / 2}});
+
+  // A click at a mode change would exceed the largest step of the input
+  // sine. The margin is a test-only tolerance.
+  CHECK(MaxStep(run.output) <= 1.2f * MaxStep(run.input));
+}
+
+TEST_CASE("leaving acceleration returns to exact passthrough") {
+  Wsola wsola = MakeWsola(1'000'000);
+
+  PhasedRun run = RunPhases(wsola, {{1'000'000, kRate / 2}, {1'050'000, kRate / 2}, {1'000'000, kRate / 2}});
+
+  const uint64_t removed = wsola.removed_frames();
+  REQUIRE(removed > 0);
+  const size_t frames = run.output.size() / kStereo;
+  const size_t checked = kRate / 10;  // last 100 ms
+  REQUIRE(frames > checked);
+  bool exact = true;
+  for (size_t j = frames - checked; j < frames; ++j) {
+    for (size_t c = 0; c < kStereo; ++c) {
+      exact = exact && run.output[j * kStereo + c] == run.input[(j + removed) * kStereo + c];
+    }
+  }
+  CHECK(exact);
+  CHECK(frames + removed == run.input.size() / kStereo);
+}
+
+TEST_CASE("removed frames never decrease across speed changes") {
+  Wsola wsola = MakeWsola(1'000'000);
+
+  PhasedRun run = RunPhases(wsola, {{1'000'000, kRate / 4},
+                                    {1'030'000, kRate / 4},
+                                    {1'000'000, kRate / 4},
+                                    {1'050'000, kRate / 4},
+                                    {1'000'000, kRate / 4}});
+
+  CHECK(std::is_sorted(run.removed_history.begin(), run.removed_history.end()));
+  CHECK(wsola.removed_frames() == wsola.consumed_input_frames() - wsola.produced_output_frames());
 }

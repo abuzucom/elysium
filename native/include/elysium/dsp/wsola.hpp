@@ -7,6 +7,13 @@
 // continuation of the previous segment. Every channel uses the same
 // shift, so stereo phase relations survive.
 //
+// At normal speed the stretcher passes input through unchanged with no
+// buffering. A change to an accelerated speed starts stretching from the
+// current position as if a segment had just ended there, which crossfades
+// over one hop. A change back to normal speed places one final segment at
+// or after the nominal position and crossfades over one hop into exact
+// passthrough. The hop length is half the window.
+//
 // Create allocates all buffers. Push, Pull, and SetSpeedPpm never
 // allocate or throw, so the real-time audio thread may call them. The
 // window and search sizes are experimental configuration
@@ -69,12 +76,22 @@ class Wsola {
   [[nodiscard]] uint64_t produced_output_frames() const noexcept { return produced_frames_; }
   // Input frames removed by acceleration (D-015 removed_frames).
   [[nodiscard]] uint64_t removed_frames() const noexcept;
+  // Input frames the stretcher needs beyond the current position before
+  // accelerated output can continue. The caller supplies them from its
+  // backlog when a correction starts.
+  [[nodiscard]] uint32_t lookahead_frames() const noexcept;
 
  private:
   explicit Wsola(const WsolaConfig& config);
 
+  bool Step() noexcept;
+  bool PassThrough() noexcept;
+  void EnterStretching() noexcept;
+  bool ExitStretching() noexcept;
   bool ProduceSegment() noexcept;
-  [[nodiscard]] int64_t ChooseSegmentStart(int64_t nominal) const noexcept;
+  void EmitHop() noexcept;
+  [[nodiscard]] int64_t ChooseSegmentStart(int64_t nominal, int64_t min_delta) const noexcept;
+  [[nodiscard]] int64_t InputEnd() const noexcept;
   [[nodiscard]] double Similarity(int64_t candidate, int64_t target) const noexcept;
   [[nodiscard]] float MonoAt(int64_t frame) const noexcept;
   void DiscardConsumedInput() noexcept;
@@ -97,6 +114,11 @@ class Wsola {
 
   // Nominal input position of the next segment, in millionths of a frame.
   int64_t nominal_micro_frames_ = 0;
+  // Mode flags. Bypass passes input through. Entering marks a pending
+  // start of stretching. Exiting marks a pending return to bypass.
+  bool bypass_ = true;
+  bool entering_ = false;
+  bool exiting_ = false;
   bool has_previous_ = false;
   int64_t previous_start_ = 0;
   uint64_t produced_frames_ = 0;
