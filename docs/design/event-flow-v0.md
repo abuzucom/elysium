@@ -1,8 +1,8 @@
 # Private event, admission, and session flow, version 0
 
-Status: Draft proposal. Not approved. This design changes event
-invitation and authorization contracts, so it needs human approval
-before implementation (bootstrap section 5).
+Status: Approved v0 by the active human on 2026-11-14 with the resolved
+decisions below. Any change to these invitation and authorization
+contracts requires new approval (bootstrap section 5).
 
 ## Purpose
 
@@ -109,22 +109,21 @@ without staff approval.
 
 ## Abuse limits
 
-- Admission requests are rate-limited per source address and per event.
-- Open requests expire after a bounded time.
+- Each source address may send at most 10 admission requests per minute.
+- Open requests expire after 60 minutes.
 - A device holds at most one open request per event.
 - The listener network (VLAN 10) reaches only the event API, time
   services, and encrypted LiveKit services.
 
-## Open questions for approval
+## Resolved decisions (2026-11-14)
 
-1. Listener token lifetime and refresh margin.
-2. Admission validity: event end plus a grace period, or a fixed
-   duration.
-3. Behavior when VenueTimeService is unsynchronized: refuse new tokens,
-   or issue tokens bounded by holdover uncertainty.
-4. Email verification method: one-time code (proposed) or magic link.
-5. Devices per invitation: one device or a small fixed number.
-6. Staff console authentication: venue-local accounts with passwords
-   (bcrypt or Argon2), passkeys, or both.
-7. Retention of invitation digests and admissions after the event.
-8. Expiry time for open admission requests and their rate limits.
+| Topic | Decision |
+| --- | --- |
+| Listener token | 60-minute lifetime. The app refreshes after 30 minutes. Removing the participant from the room ends access at once |
+| Admission validity | Scheduled event end plus a grace period. Grace defaults to 4 hours with a 6-hour maximum. The organizer or event manager sets it per event |
+| Venue time unsynchronized | During holdover, tokens keep issuing with lifetimes shortened by the current uncertainty. Once unsynchronized, new tokens are refused and the technical operator receives an alert |
+| Email verification | One-time code by email, entered in the app |
+| Devices per invitation | One device per invitation. The device replacement procedure stays open |
+| Staff sign-in | Passkeys where supported, with an Argon2id password fallback. All accounts stay local to the venue controller |
+| Retention | The organizer sets retention per event for invitation digests and admission records. Default 7 days after the event, maximum 30 days |
+| Admission requests | Open requests expire after 60 minutes. At most 10 requests per minute per source address |

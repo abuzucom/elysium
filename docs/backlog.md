@@ -158,12 +158,10 @@ These Gate 0 findings remain unverified.
 
 ## Security and admission
 
-- The draft event, admission, and session design in
-  `docs/design/event-flow-v0.md` awaits approval with eight open
-  questions.
+- The event design in `docs/design/event-flow-v0.md` is approved v0.
+  The device replacement procedure for the one-device invitation limit
+  remains open.
 
-- Security token lifetimes and enrollment specifics.
-- Offline admission expiry under venue clock failure.
 - Broadcaster certificate enrollment, rotation, and revocation procedure.
 
 ## Calendar and scheduling
@@ -179,9 +177,9 @@ These Gate 0 findings remain unverified.
   decision (2026-11-14).
 - Access point capacity and later deployment assumptions.
 - Mobile and native build infrastructure: hosted macOS CI by human
-  decision. The draft plan in `docs/design/native-ci-plan.md` shows that
-  standard runners (14 GB storage) cannot build patched libwebrtc and
-  proposes phases with prebuilt WebRTC first.
+  decision. The approved plan in `docs/design/native-ci-plan.md` starts
+  with Phase A on standard runners and prebuilt WebRTC. The Phase B
+  patched libwebrtc build host remains open.
 
 ## Documentation
 
