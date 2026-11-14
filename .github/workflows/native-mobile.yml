@@ -1,0 +1,108 @@
+name: native-mobile
+
+# Gate 3 Phase A (docs/design/native-ci-plan.md): build the shared C++
+# core for Android and iOS. Android cross-compiles only. iOS also runs
+# the tests on the simulator. Tool versions are pinned by human approval
+# (docs/decisions.md).
+
+on:
+  pull_request:
+    paths:
+      - "native/**"
+      - ".github/workflows/native-mobile.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "native/**"
+      - ".github/workflows/native-mobile.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, x86_64]
+    name: android (${{ matrix.abi }})
+    env:
+      NDK_VERSION: 27.3.13750724
+      ANDROID_MIN_API: "26"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Locate pinned NDK
+        run: |
+          ndk="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}/ndk/$NDK_VERSION"
+          if [ ! -f "$ndk/build/cmake/android.toolchain.cmake" ]; then
+            echo "Pinned NDK $NDK_VERSION is missing from the runner image at $ndk."
+            echo "Installed NDKs:"
+            ls "${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}/ndk" || true
+            exit 1
+          fi
+          echo "NDK_HOME=$ndk" >> "$GITHUB_ENV"
+      - name: Configure
+        run: >
+          cmake -S native -B build
+          -DCMAKE_TOOLCHAIN_FILE="$NDK_HOME/build/cmake/android.toolchain.cmake"
+          -DANDROID_ABI=${{ matrix.abi }}
+          -DANDROID_PLATFORM=android-$ANDROID_MIN_API
+      - name: Build library, tests, and tools
+        run: cmake --build build --parallel
+
+  ios:
+    runs-on: macos-15
+    env:
+      XCODE_APP: /Applications/Xcode_16.4.app
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Select pinned Xcode
+        run: |
+          if [ ! -d "$XCODE_APP" ]; then
+            echo "Pinned Xcode is missing at $XCODE_APP. Installed:"
+            ls -d /Applications/Xcode*.app || true
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE_APP"
+          xcodebuild -version
+      - name: Build for iOS device (arm64)
+        run: >
+          cmake -S native -B build-device
+          -DCMAKE_SYSTEM_NAME=iOS
+          -DCMAKE_OSX_SYSROOT=iphoneos
+          -DCMAKE_OSX_ARCHITECTURES=arm64
+          && cmake --build build-device --parallel
+      - name: Build for iOS simulator (arm64)
+        run: >
+          cmake -S native -B build-sim
+          -DCMAKE_SYSTEM_NAME=iOS
+          -DCMAKE_OSX_SYSROOT=iphonesimulator
+          -DCMAKE_OSX_ARCHITECTURES=arm64
+          && cmake --build build-sim --parallel
+      - name: Run tests on the iOS simulator
+        run: |
+          udid="$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          for runtime, entries in devices.items():
+              if "iOS" in runtime:
+                  for device in entries:
+                      if device["name"].startswith("iPhone"):
+                          print(device["udid"])
+                          sys.exit(0)
+          sys.exit("no available iPhone simulator")
+          ')"
+          # CMake builds iOS executables as app bundles.
+          tests="$PWD/build-sim/elysium_native_tests.app/elysium_native_tests"
+          if [ ! -x "$tests" ]; then
+            echo "Test binary missing at $tests"
+            exit 1
+          fi
+          xcrun simctl boot "$udid"
+          xcrun simctl spawn "$udid" "$tests"
