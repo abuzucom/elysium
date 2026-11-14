@@ -98,5 +98,11 @@ jobs:
                           sys.exit(0)
           sys.exit("no available iPhone simulator")
           ')"
+          # CMake builds iOS executables as app bundles.
+          tests="$PWD/build-sim/elysium_native_tests.app/elysium_native_tests"
+          if [ ! -x "$tests" ]; then
+            echo "Test binary missing at $tests"
+            exit 1
+          fi
           xcrun simctl boot "$udid"
-          xcrun simctl spawn "$udid" "$PWD/build-sim/elysium_native_tests"
+          xcrun simctl spawn "$udid" "$tests"
