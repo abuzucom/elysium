@@ -12,7 +12,8 @@ provenance to the venue gateway (D-003, D-005, D-006, D-008)?
 
 Labels used below: **[source]** marks a fact from a cited page.
 **[derived]** marks arithmetic from those facts. **[unverified]** marks
-an assumption that needs a hardware test.
+an assumption that needs a hardware test. **[confirmed]** marks a fact
+the human confirmed on 2026-11-14.
 
 ## Short answer
 
@@ -34,7 +35,7 @@ an assumption that needs a hardware test.
 | On-chip RAM | 768 KB L2 memory, plus 32 KB LP SRAM **[source]** | 512 KB SRAM **[source]** |
 | PSRAM | 16 MB or 32 MB in package **[source]** | Optional, up to 8 MB on chip, up to 16 MB on some modules **[source]** |
 | Ethernet | 10/100 Mbit MAC with RMII, external PHY needed **[source]** | No MAC. SPI Ethernet such as W5500 needed **[source]** |
-| Wi-Fi | Believed absent on chip. Boards such as the Waveshare ESP32-P4-WIFI6 add a separate radio **[unverified]** | 2.4 GHz Wi-Fi and Bluetooth LE **[source]** |
+| Wi-Fi | None on chip **[confirmed]**. Boards such as the Waveshare ESP32-P4-WIFI6 add a separate radio | 2.4 GHz Wi-Fi and Bluetooth LE **[source]** |
 | Audio input | I2S with PDM **[source]** | I2S **[source]** |
 
 The P4 datasheets found are preliminary (v0.4 and v0.7). Final figures
