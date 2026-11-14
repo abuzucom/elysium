@@ -108,6 +108,8 @@ need the production datasheet.
 
 ## Proposed bench test
 
+On hold: the human deferred hardware purchases on 2026-11-14.
+
 1. Obtain one ESP32-P4 board with Ethernet and one ESP32-S3 board with a
    W5500, plus a stereo I2S ADC board. This costs money and needs
    approval.

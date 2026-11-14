@@ -175,7 +175,8 @@ These Gate 0 findings remain unverified.
 
 - ESP32 board, audio ADC, and firmware capacity. The desk study in
   `docs/poc/esp32-desk-study.md` favors ESP32-P4 and proposes a bench
-  test that needs board purchases.
+  test that needs board purchases. Hardware stays on hold by human
+  decision (2026-11-14).
 - Access point capacity and later deployment assumptions.
 - Mobile and native build infrastructure: a macOS host, the Android NDK, a
   libwebrtc build host, and test phones.
