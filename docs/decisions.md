@@ -95,5 +95,6 @@ sequence.
 | Native CI runner | Pinned to ubuntu-24.04 for a reproducible toolchain | Gate 3 onward |
 | Event, admission, and session design | v0 approved: 60-minute listener tokens refreshed after 30 minutes, admission until event end plus a 4-hour default grace (6-hour maximum, set by organizer or event manager), bounded tokens during venue time holdover, one-time email codes, one device per invitation, passkeys with Argon2id fallback for staff, retention 7 days default and 30 days maximum, request expiry 60 minutes at 10 per minute. See docs/design/event-flow-v0.md. | Gate 5 |
 | Hosted native build CI | Phase A approved with prebuilt, unpatched WebRTC. Phase B host decided later. Budget managed by the human in GitHub. Tool versions presented for approval. See docs/design/native-ci-plan.md. | Gate 3 |
+| Flutter app shell | Application identifier com.abuzucom.listener. Flutter 3.47.9 (Dart 3.13.7). livekit_client 2.13.2 with flutter_webrtc 1.6.3 and prebuilt WebRTC 150.7871.04. Minimum Android 8.0 (API 26) and iOS 15. | Gate 3 Phase A |
 | Native language standard | C++20 | Gate 3 onward |
 | Native CI | GitHub Actions job with clang and gcc sanitizer builds | Gate 3 onward |

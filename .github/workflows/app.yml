@@ -1,0 +1,98 @@
+name: app
+
+# Flutter listener app shell (Gate 3 Phase A). Flutter is downloaded from
+# the official release archive and verified by SHA-256 instead of a
+# third-party setup action. Versions are pinned by human approval
+# (docs/decisions.md).
+
+on:
+  pull_request:
+    paths:
+      - "app/**"
+      - ".github/workflows/app.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "app/**"
+      - ".github/workflows/app.yml"
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: 3.47.9
+  FLUTTER_BASE_URL: https://storage.googleapis.com/flutter_infra_release/releases
+
+jobs:
+  checks-and-android:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: app
+    env:
+      FLUTTER_ARCHIVE: stable/linux/flutter_linux_3.47.9-stable.tar.xz
+      FLUTTER_SHA256: 25ed8c3c29d51a7353f2a944310b478af8214920639524b19c50a19e6c044c5a
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Install pinned Flutter
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -fsSL -o flutter.tar.xz "$FLUTTER_BASE_URL/$FLUTTER_ARCHIVE"
+          echo "$FLUTTER_SHA256  flutter.tar.xz" | sha256sum -c -
+          tar -xJf flutter.tar.xz
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - name: Show versions
+        run: flutter --version
+      - name: Resolve dependencies from the lockfile
+        run: flutter pub get --enforce-lockfile
+      - name: Check formatting
+        run: dart format --set-exit-if-changed lib test
+      - name: Analyze
+        run: flutter analyze
+      - name: Test
+        run: flutter test
+      - name: Build Android debug APK
+        run: flutter build apk --debug
+
+  ios:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: app
+    env:
+      XCODE_APP: /Applications/Xcode_16.4.app
+      FLUTTER_ARCHIVE: stable/macos/flutter_macos_arm64_3.47.9-stable.zip
+      FLUTTER_SHA256: 6545b85938745dc5070e9faf2adf70233c1811009d87fe6d27bfcda5a04b7698
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Select pinned Xcode
+        run: |
+          if [ ! -d "$XCODE_APP" ]; then
+            echo "Pinned Xcode is missing at $XCODE_APP. Installed:"
+            ls -d /Applications/Xcode*.app || true
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE_APP"
+          xcodebuild -version
+      - name: Install pinned Flutter
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -fsSL -o flutter.zip "$FLUTTER_BASE_URL/$FLUTTER_ARCHIVE"
+          echo "$FLUTTER_SHA256  flutter.zip" | shasum -a 256 -c -
+          unzip -q flutter.zip
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - name: Resolve dependencies from the lockfile
+        run: flutter pub get --enforce-lockfile
+      - name: Build iOS simulator app without code signing
+        run: flutter build ios --simulator --debug --no-codesign
+      - name: Show generated CocoaPods lockfile
+        # The Podfile and Podfile.lock appear on the first iOS build. This
+        # container has no macOS, so they are generated here and committed
+        # in a follow-up.
+        run: |
+          if [ -f ios/Podfile.lock ]; then cat ios/Podfile.lock; fi
