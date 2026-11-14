@@ -110,15 +110,17 @@ experimental until a human approves them. Approved choices live in
   All remain experimental values.
 - Allowed speeds: exactly 1.00, or 1.01 to 1.05 (D-025). The stretcher
   rejects other values and keeps its current speed.
-- The stretcher buffers 16 to 24 ms of input in steady state and 30 ms
-  before first output. Bypass at normal speed with a crossfade into
-  stretching remains a design question against the 80 ms target
-  (D-022).
+- Normal speed bypasses the stretcher with no buffering. While a
+  correction runs, the stretcher buffers 16 to 24 ms and needs 1200
+  frames of look-ahead from the renderer backlog. The one-hop (10 ms)
+  crossfade at each mode change is experimental.
 - At 1.03 the click test lost 2 of 100 transients. Transient-aware
   segment selection remains open.
-- Speed changes apply at the next segment without a crossfade. The
-  audible effect of a speed step remains unmeasured.
-- See `docs/poc/wsola-offline-2026-11-13.md` for the measurements.
+- Speed changes between accelerated speeds apply at the next segment.
+  The audible effect of mode changes and speed steps remains unmeasured
+  by listening tests.
+- See `docs/poc/wsola-offline-2026-11-13.md` and
+  `docs/poc/wsola-bypass-2026-11-14.md` for the measurements.
 
 ## DSP and audio rendering
 
