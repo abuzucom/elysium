@@ -178,8 +178,10 @@ These Gate 0 findings remain unverified.
   test that needs board purchases. Hardware stays on hold by human
   decision (2026-11-14).
 - Access point capacity and later deployment assumptions.
-- Mobile and native build infrastructure: a macOS host, the Android NDK, a
-  libwebrtc build host, and test phones.
+- Mobile and native build infrastructure: hosted macOS CI by human
+  decision. The draft plan in `docs/design/native-ci-plan.md` shows that
+  standard runners (14 GB storage) cannot build patched libwebrtc and
+  proposes phases with prebuilt WebRTC first.
 
 ## Documentation
 
