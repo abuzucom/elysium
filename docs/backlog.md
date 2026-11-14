@@ -158,6 +158,10 @@ These Gate 0 findings remain unverified.
 
 ## Security and admission
 
+- The draft event, admission, and session design in
+  `docs/design/event-flow-v0.md` awaits approval with eight open
+  questions.
+
 - Security token lifetimes and enrollment specifics.
 - Offline admission expiry under venue clock failure.
 - Broadcaster certificate enrollment, rotation, and revocation procedure.
