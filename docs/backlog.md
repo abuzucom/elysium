@@ -53,8 +53,9 @@ experimental until a human approves them. Approved choices live in
   synthetic audio. The receiver needs a rule to detect them.
 - The published track carries no LiveKit track source. Setting one needs
   a direct `livekit/protocol` import, which awaits dependency approval.
-- The LiveKit integration test runs only with `-tags livekit` and a
-  `LIVEKIT_SERVER_BIN` path. CI does not build the server or run it.
+- The `livekit-integration` CI job builds livekit-server v1.13.11 from the
+  Go module proxy and runs the `-tags livekit` integration tests on pull
+  requests that touch `gateway/`.
 - Publisher reconnection after a LiveKit restart remains open.
 
 ## Venue time and sample mapping (experimental configuration)
