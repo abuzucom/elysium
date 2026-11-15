@@ -58,12 +58,15 @@ jobs:
         run: flutter build apk --debug
 
   ios:
-    runs-on: macos-15
+    # Xcode 26.1 or newer is required: device_info_plus (a livekit_client
+    # dependency) calls an iOS 26.1 SDK API. Xcode 26.5 pairs with the
+    # installed iOS 26.5 simulator runtime.
+    runs-on: macos-26
     defaults:
       run:
         working-directory: app
     env:
-      XCODE_APP: /Applications/Xcode_16.4.app
+      XCODE_APP: /Applications/Xcode_26.5.app
       FLUTTER_ARCHIVE: stable/macos/flutter_macos_arm64_3.47.9-stable.zip
       FLUTTER_SHA256: 6545b85938745dc5070e9faf2adf70233c1811009d87fe6d27bfcda5a04b7698
     steps:
