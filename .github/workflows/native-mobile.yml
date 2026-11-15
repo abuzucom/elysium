@@ -55,9 +55,11 @@ jobs:
         run: cmake --build build --parallel
 
   ios:
-    runs-on: macos-15
+    # One iOS toolchain for the core and the app: Xcode 26.5 on macos-26
+    # with the matching iOS 26.5 simulator runtime.
+    runs-on: macos-26
     env:
-      XCODE_APP: /Applications/Xcode_16.4.app
+      XCODE_APP: /Applications/Xcode_26.5.app
     steps:
       - uses: actions/checkout@v5
         with:
