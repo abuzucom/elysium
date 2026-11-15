@@ -92,10 +92,7 @@ jobs:
       - name: Resolve dependencies from the lockfile
         run: flutter pub get --enforce-lockfile
       - name: Build iOS simulator app without code signing
+        # Flutter 3.47 resolves iOS plugins with Swift Package Manager, not
+        # CocoaPods. flutter_webrtc pins the WebRTC xcframework by version
+        # and SHA-256 checksum in its Package.swift.
         run: flutter build ios --simulator --debug --no-codesign
-      - name: Show generated CocoaPods lockfile
-        # The Podfile and Podfile.lock appear on the first iOS build. This
-        # container has no macOS, so they are generated here and committed
-        # in a follow-up.
-        run: |
-          if [ -f ios/Podfile.lock ]; then cat ios/Podfile.lock; fi
