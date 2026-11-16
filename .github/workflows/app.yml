@@ -34,7 +34,7 @@ jobs:
       FLUTTER_ARCHIVE: stable/linux/flutter_linux_3.47.9-stable.tar.xz
       FLUTTER_SHA256: 25ed8c3c29d51a7353f2a944310b478af8214920639524b19c50a19e6c044c5a
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           persist-credentials: false
       - name: Install pinned Flutter
@@ -70,7 +70,7 @@ jobs:
       FLUTTER_ARCHIVE: stable/macos/flutter_macos_arm64_3.47.9-stable.zip
       FLUTTER_SHA256: 6545b85938745dc5070e9faf2adf70233c1811009d87fe6d27bfcda5a04b7698
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           persist-credentials: false
       - name: Select pinned Xcode
