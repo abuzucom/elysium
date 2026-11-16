@@ -1,0 +1,509 @@
+package admission
+
+import (
+	"errors"
+	"net/netip"
+	"regexp"
+	"testing"
+	"time"
+
+	"github.com/livekit/protocol/auth"
+)
+
+var sixDigits = regexp.MustCompile(`^[0-9]{6}$`)
+
+func TestNewServiceRejectsMissingConfiguration(t *testing.T) {
+	clock := &fakeClock{}
+	valid := Config{
+		Clock:            clock,
+		Monotonic:        clock.Monotonic,
+		Random:           zeroReader{},
+		Store:            NewMemoryStore(),
+		LiveKitAPIKey:    testAPIKey,
+		LiveKitAPISecret: testAPISecret,
+	}
+	cases := map[string]func(*Config){
+		"clock":     func(c *Config) { c.Clock = nil },
+		"monotonic": func(c *Config) { c.Monotonic = nil },
+		"random":    func(c *Config) { c.Random = nil },
+		"store":     func(c *Config) { c.Store = nil },
+		"api key":   func(c *Config) { c.LiveKitAPIKey = "" },
+		"secret":    func(c *Config) { c.LiveKitAPISecret = "" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg := valid
+			mutate(&cfg)
+			if _, err := NewService(cfg); !errors.Is(err, ErrInvalidArgument) {
+				t.Fatalf("NewService error = %v, want ErrInvalidArgument", err)
+			}
+		})
+	}
+}
+
+func TestAddEventValidatesGrace(t *testing.T) {
+	f := newFixture(t)
+	tooLong := 6*time.Hour + time.Second
+	negative := -time.Second
+	cases := map[string]Event{
+		"grace over maximum": {ID: "e2", Start: testEventStart, End: testEventEnd, Grace: &tooLong},
+		"negative grace":     {ID: "e3", Start: testEventStart, End: testEventEnd, Grace: &negative},
+		"end before start":   {ID: "e4", Start: testEventEnd, End: testEventStart},
+		"bad identifier":     {ID: "room/../x", Start: testEventStart, End: testEventEnd},
+		"duplicate":          {ID: testEventID, Start: testEventStart, End: testEventEnd},
+	}
+	for name, event := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := f.service.AddEvent(event); !errors.Is(err, ErrInvalidArgument) {
+				t.Fatalf("AddEvent error = %v, want ErrInvalidArgument", err)
+			}
+		})
+	}
+}
+
+func TestRequestAdmissionReturnsSixDigitCode(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	receipt, err := f.service.RequestAdmission(testSource, device.admissionRequest(t, testEventID))
+	if err != nil {
+		t.Fatalf("RequestAdmission: %v", err)
+	}
+	if !sixDigits.MatchString(receipt.Code) {
+		t.Fatalf("code %q is not six digits", receipt.Code)
+	}
+	if receipt.DeviceID != DeviceID(device.der) {
+		t.Fatalf("device id %q, want %q", receipt.DeviceID, DeviceID(device.der))
+	}
+	if receipt.ExpiresIn != RequestLifetime {
+		t.Fatalf("expires in %v, want %v", receipt.ExpiresIn, RequestLifetime)
+	}
+}
+
+func TestRequestAdmissionRejectsBadSignature(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	other := newTestDevice(t)
+	request := device.admissionRequest(t, testEventID)
+	request.Signature = other.sign(t, RequestMessage(testEventID, device.der))
+	if _, err := f.service.RequestAdmission(testSource, request); !errors.Is(err, ErrBadSignature) {
+		t.Fatalf("error = %v, want ErrBadSignature", err)
+	}
+}
+
+func TestRequestAdmissionRejectsSignatureForOtherEvent(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	request := device.admissionRequest(t, "event-2")
+	request.EventID = testEventID
+	if _, err := f.service.RequestAdmission(testSource, request); !errors.Is(err, ErrBadSignature) {
+		t.Fatalf("error = %v, want ErrBadSignature", err)
+	}
+}
+
+func TestRequestAdmissionRejectsUnknownEvent(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	if _, err := f.service.RequestAdmission(testSource, device.admissionRequest(t, "missing")); !errors.Is(err, ErrUnknownEvent) {
+		t.Fatalf("error = %v, want ErrUnknownEvent", err)
+	}
+}
+
+func TestRequestAdmissionRejectsNonP256Key(t *testing.T) {
+	f := newFixture(t)
+	request := SignedRequest{EventID: testEventID, PublicKey: []byte("not a key"), Signature: []byte{1}}
+	if _, err := f.service.RequestAdmission(testSource, request); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("error = %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestOneOpenRequestPerDevice(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	first, err := f.service.RequestAdmission(testSource, device.admissionRequest(t, testEventID))
+	if err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	f.clock.advance(time.Minute)
+	second, err := f.service.RequestAdmission(testSource, device.admissionRequest(t, testEventID))
+	if err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	if second.Code != first.Code {
+		t.Fatalf("second code %q, want the open request code %q", second.Code, first.Code)
+	}
+	if want := RequestLifetime - time.Minute; second.ExpiresIn != want {
+		t.Fatalf("second expires in %v, want %v", second.ExpiresIn, want)
+	}
+}
+
+func TestCodesStayUniqueAmongOpenRequests(t *testing.T) {
+	f := newFixtureWithRandom(t, zeroReader{})
+	first := newTestDevice(t)
+	if _, err := f.service.RequestAdmission(testSource, first.admissionRequest(t, testEventID)); err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	second := newTestDevice(t)
+	_, err := f.service.RequestAdmission(netip.MustParseAddr("10.10.0.6"), second.admissionRequest(t, testEventID))
+	if !errors.Is(err, ErrCodeSpaceExhausted) {
+		t.Fatalf("error = %v, want ErrCodeSpaceExhausted", err)
+	}
+}
+
+func TestExpiredRequestReleasesItsCode(t *testing.T) {
+	f := newFixtureWithRandom(t, zeroReader{})
+	first := newTestDevice(t)
+	if _, err := f.service.RequestAdmission(testSource, first.admissionRequest(t, testEventID)); err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	f.clock.advance(RequestLifetime)
+	second := newTestDevice(t)
+	if _, err := f.service.RequestAdmission(netip.MustParseAddr("10.10.0.6"), second.admissionRequest(t, testEventID)); err != nil {
+		t.Fatalf("request after expiry: %v", err)
+	}
+}
+
+func TestRateLimitPerSourceAddress(t *testing.T) {
+	f := newFixture(t)
+	for i := range RequestRateLimit {
+		device := newTestDevice(t)
+		if _, err := f.service.RequestAdmission(testSource, device.admissionRequest(t, testEventID)); err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+	}
+	device := newTestDevice(t)
+	if _, err := f.service.RequestAdmission(testSource, device.admissionRequest(t, testEventID)); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("error = %v, want ErrRateLimited", err)
+	}
+	other := netip.MustParseAddr("10.10.0.7")
+	if _, err := f.service.RequestAdmission(other, device.admissionRequest(t, testEventID)); err != nil {
+		t.Fatalf("request from another address: %v", err)
+	}
+	f.clock.advance(RequestRateWindow)
+	late := newTestDevice(t)
+	if _, err := f.service.RequestAdmission(testSource, late.admissionRequest(t, testEventID)); err != nil {
+		t.Fatalf("request after the window: %v", err)
+	}
+}
+
+func TestApproveCreatesAdmission(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	approvedAt := f.clock.Now().UTC
+	admission := f.admit(t, device)
+	if admission.Method != MethodStaffApproval {
+		t.Fatalf("method %v, want staff approval", admission.Method)
+	}
+	if admission.ApproverID != testApprover {
+		t.Fatalf("approver %q, want %q", admission.ApproverID, testApprover)
+	}
+	if !admission.ApprovedAt.Equal(approvedAt) {
+		t.Fatalf("approved at %v, want venue UTC %v", admission.ApprovedAt, approvedAt)
+	}
+	if want := testEventEnd.Add(DefaultGrace); !admission.ValidUntil.Equal(want) {
+		t.Fatalf("valid until %v, want %v", admission.ValidUntil, want)
+	}
+}
+
+func TestApproveUsesEventGrace(t *testing.T) {
+	f := newFixture(t)
+	grace := 6 * time.Hour
+	if err := f.service.AddEvent(Event{ID: "event-2", Start: testEventStart, End: testEventEnd, Grace: &grace}); err != nil {
+		t.Fatalf("AddEvent: %v", err)
+	}
+	device := newTestDevice(t)
+	receipt, err := f.service.RequestAdmission(testSource, device.admissionRequest(t, "event-2"))
+	if err != nil {
+		t.Fatalf("RequestAdmission: %v", err)
+	}
+	admission, err := f.service.Approve("event-2", receipt.Code, testApprover)
+	if err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	if want := testEventEnd.Add(grace); !admission.ValidUntil.Equal(want) {
+		t.Fatalf("valid until %v, want %v", admission.ValidUntil, want)
+	}
+}
+
+func TestApproveConsumesTheRequest(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	receipt, err := f.service.RequestAdmission(testSource, device.admissionRequest(t, testEventID))
+	if err != nil {
+		t.Fatalf("RequestAdmission: %v", err)
+	}
+	if _, err := f.service.Approve(testEventID, receipt.Code, testApprover); err != nil {
+		t.Fatalf("first approve: %v", err)
+	}
+	if _, err := f.service.Approve(testEventID, receipt.Code, testApprover); !errors.Is(err, ErrRequestNotFound) {
+		t.Fatalf("second approve error = %v, want ErrRequestNotFound", err)
+	}
+}
+
+func TestApproveRejectsExpiredRequest(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	receipt, err := f.service.RequestAdmission(testSource, device.admissionRequest(t, testEventID))
+	if err != nil {
+		t.Fatalf("RequestAdmission: %v", err)
+	}
+	f.clock.advance(RequestLifetime)
+	if _, err := f.service.Approve(testEventID, receipt.Code, testApprover); !errors.Is(err, ErrRequestNotFound) {
+		t.Fatalf("error = %v, want ErrRequestNotFound", err)
+	}
+}
+
+func TestApproveRequiresApprover(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	receipt, err := f.service.RequestAdmission(testSource, device.admissionRequest(t, testEventID))
+	if err != nil {
+		t.Fatalf("RequestAdmission: %v", err)
+	}
+	if _, err := f.service.Approve(testEventID, receipt.Code, ""); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("error = %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestApproveRefusesWithoutVenueTime(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	receipt, err := f.service.RequestAdmission(testSource, device.admissionRequest(t, testEventID))
+	if err != nil {
+		t.Fatalf("RequestAdmission: %v", err)
+	}
+	f.clock.set(VenueTime{State: SyncStateUnsynchronized})
+	if _, err := f.service.Approve(testEventID, receipt.Code, testApprover); !errors.Is(err, ErrVenueTimeUnavailable) {
+		t.Fatalf("error = %v, want ErrVenueTimeUnavailable", err)
+	}
+}
+
+func TestApproveRefusesAfterAdmissionWindow(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	receipt, err := f.service.RequestAdmission(testSource, device.admissionRequest(t, testEventID))
+	if err != nil {
+		t.Fatalf("RequestAdmission: %v", err)
+	}
+	f.clock.set(synchronizedAt(testEventEnd.Add(DefaultGrace)))
+	if _, err := f.service.Approve(testEventID, receipt.Code, testApprover); !errors.Is(err, ErrAdmissionExpired) {
+		t.Fatalf("error = %v, want ErrAdmissionExpired", err)
+	}
+}
+
+func TestIssueTokenGrantsSubscribeOnly(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	f.admit(t, device)
+	token, err := f.token(t, device)
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+	if token.ValidFor != TokenLifetime {
+		t.Fatalf("valid for %v, want %v", token.ValidFor, TokenLifetime)
+	}
+	if token.RefreshAfter != TokenRefreshAfter {
+		t.Fatalf("refresh after %v, want %v", token.RefreshAfter, TokenRefreshAfter)
+	}
+	verifier, err := auth.ParseAPIToken(token.JWT)
+	if err != nil {
+		t.Fatalf("ParseAPIToken: %v", err)
+	}
+	if verifier.APIKey() != testAPIKey {
+		t.Fatalf("api key %q, want %q", verifier.APIKey(), testAPIKey)
+	}
+	claims, grants, err := verifier.Verify(testAPISecret)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if lifetime := claims.ExpiresAt.Sub(claims.NotBefore.Time); lifetime != TokenLifetime {
+		t.Fatalf("jwt lifetime %v, want %v", lifetime, TokenLifetime)
+	}
+	if grants.Identity != DeviceID(device.der) {
+		t.Fatalf("identity %q, want device id", grants.Identity)
+	}
+	video := grants.Video
+	if video == nil || !video.RoomJoin || video.Room != testEventID {
+		t.Fatalf("video grant %+v does not join only the event room", video)
+	}
+	if video.RoomCreate || video.RoomList || video.RoomAdmin || video.RoomRecord {
+		t.Fatalf("video grant %+v carries room administration", video)
+	}
+	if !video.GetCanSubscribe() {
+		t.Fatal("token cannot subscribe")
+	}
+	if video.GetCanPublish() || video.GetCanPublishData() || video.GetCanUpdateOwnMetadata() {
+		t.Fatalf("token can publish: %+v", video)
+	}
+}
+
+func TestIssueTokenRequiresAdmission(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	if _, err := f.token(t, device); !errors.Is(err, ErrNoAdmission) {
+		t.Fatalf("error = %v, want ErrNoAdmission", err)
+	}
+}
+
+func TestIssueTokenRejectsBadSignature(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	f.admit(t, device)
+	challenge, err := f.service.Challenge(testEventID)
+	if err != nil {
+		t.Fatalf("Challenge: %v", err)
+	}
+	other := newTestDevice(t)
+	request := device.tokenRequest(t, testEventID, challenge)
+	request.Signature = other.sign(t, SessionMessage(testEventID, challenge))
+	if _, err := f.service.IssueToken(request); !errors.Is(err, ErrBadSignature) {
+		t.Fatalf("error = %v, want ErrBadSignature", err)
+	}
+}
+
+func TestChallengeIsSingleUse(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	f.admit(t, device)
+	challenge, err := f.service.Challenge(testEventID)
+	if err != nil {
+		t.Fatalf("Challenge: %v", err)
+	}
+	request := device.tokenRequest(t, testEventID, challenge)
+	if _, err := f.service.IssueToken(request); err != nil {
+		t.Fatalf("first IssueToken: %v", err)
+	}
+	if _, err := f.service.IssueToken(request); !errors.Is(err, ErrChallengeInvalid) {
+		t.Fatalf("replay error = %v, want ErrChallengeInvalid", err)
+	}
+}
+
+func TestChallengeExpires(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	f.admit(t, device)
+	challenge, err := f.service.Challenge(testEventID)
+	if err != nil {
+		t.Fatalf("Challenge: %v", err)
+	}
+	f.clock.advance(ChallengeLifetime)
+	if _, err := f.service.IssueToken(device.tokenRequest(t, testEventID, challenge)); !errors.Is(err, ErrChallengeInvalid) {
+		t.Fatalf("error = %v, want ErrChallengeInvalid", err)
+	}
+}
+
+func TestChallengeIsBoundToEvent(t *testing.T) {
+	f := newFixture(t)
+	grace := DefaultGrace
+	if err := f.service.AddEvent(Event{ID: "event-2", Start: testEventStart, End: testEventEnd, Grace: &grace}); err != nil {
+		t.Fatalf("AddEvent: %v", err)
+	}
+	device := newTestDevice(t)
+	f.admit(t, device)
+	challenge, err := f.service.Challenge("event-2")
+	if err != nil {
+		t.Fatalf("Challenge: %v", err)
+	}
+	if _, err := f.service.IssueToken(device.tokenRequest(t, testEventID, challenge)); !errors.Is(err, ErrChallengeInvalid) {
+		t.Fatalf("error = %v, want ErrChallengeInvalid", err)
+	}
+}
+
+func TestIssueTokenRefusesRevokedAdmission(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	f.admit(t, device)
+	if err := f.service.Revoke(testEventID, DeviceID(device.der)); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if _, err := f.token(t, device); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("error = %v, want ErrRevoked", err)
+	}
+}
+
+func TestIssueTokenRefusesWhenUnsynchronized(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	f.admit(t, device)
+	f.clock.set(VenueTime{State: SyncStateUnsynchronized})
+	if _, err := f.token(t, device); !errors.Is(err, ErrVenueTimeUnavailable) {
+		t.Fatalf("error = %v, want ErrVenueTimeUnavailable", err)
+	}
+}
+
+func TestIssueTokenShortensLifetimeInHoldover(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	f.admit(t, device)
+	now := f.clock.Now().UTC
+	f.clock.set(VenueTime{UTC: now, Uncertainty: 90 * time.Second, State: SyncStateHoldover})
+	token, err := f.token(t, device)
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+	if want := TokenLifetime - 90*time.Second; token.ValidFor != want {
+		t.Fatalf("valid for %v, want %v", token.ValidFor, want)
+	}
+}
+
+func TestIssueTokenRefusesWhenHoldoverUncertaintyConsumesLifetime(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	f.admit(t, device)
+	now := f.clock.Now().UTC
+	f.clock.set(VenueTime{UTC: now, Uncertainty: TokenLifetime, State: SyncStateHoldover})
+	if _, err := f.token(t, device); !errors.Is(err, ErrVenueTimeUnavailable) {
+		t.Fatalf("error = %v, want ErrVenueTimeUnavailable", err)
+	}
+}
+
+func TestIssueTokenEndsAtAdmissionValidity(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	admission := f.admit(t, device)
+	f.clock.set(synchronizedAt(admission.ValidUntil.Add(-20 * time.Minute)))
+	token, err := f.token(t, device)
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+	// The latest possible venue time includes the uncertainty. Lifetimes
+	// truncate to whole seconds for the JWT expiry claim.
+	if want := 20*time.Minute - time.Second; token.ValidFor != want {
+		t.Fatalf("valid for %v, want %v", token.ValidFor, want)
+	}
+	if want := token.ValidFor / 2; token.RefreshAfter != want {
+		t.Fatalf("refresh after %v, want %v", token.RefreshAfter, want)
+	}
+}
+
+func TestIssueTokenRefusesExpiredAdmission(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	admission := f.admit(t, device)
+	f.clock.set(synchronizedAt(admission.ValidUntil))
+	if _, err := f.token(t, device); !errors.Is(err, ErrAdmissionExpired) {
+		t.Fatalf("error = %v, want ErrAdmissionExpired", err)
+	}
+}
+
+func TestOutstandingChallengesAreBounded(t *testing.T) {
+	f := newFixture(t)
+	for i := range MaxOutstandingChallenges {
+		if _, err := f.service.Challenge(testEventID); err != nil {
+			t.Fatalf("challenge %d: %v", i, err)
+		}
+	}
+	if _, err := f.service.Challenge(testEventID); !errors.Is(err, ErrTooManyChallenges) {
+		t.Fatalf("error = %v, want ErrTooManyChallenges", err)
+	}
+	f.clock.advance(ChallengeLifetime)
+	if _, err := f.service.Challenge(testEventID); err != nil {
+		t.Fatalf("challenge after expiry: %v", err)
+	}
+}
+
+func TestRevokeRequiresAdmission(t *testing.T) {
+	f := newFixture(t)
+	if err := f.service.Revoke(testEventID, "missing"); !errors.Is(err, ErrNoAdmission) {
+		t.Fatalf("error = %v, want ErrNoAdmission", err)
+	}
+}

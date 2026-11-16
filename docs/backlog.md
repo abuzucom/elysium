@@ -164,6 +164,30 @@ These Gate 0 findings remain unverified.
 
 - Broadcaster certificate enrollment, rotation, and revocation procedure.
 
+## Event service core (experimental configuration and findings)
+
+- Challenge lifetime of 60 seconds, at most 4096 outstanding challenges,
+  and a minimum token lifetime of 60 seconds. All three live as package
+  constants in `eventsvc/internal/admission`.
+- The rate limiter sweeps idle source addresses once it tracks more than
+  1024 of them.
+- Request expiry, challenge expiry, and rate windows use a monotonic
+  clock. Admission validity and token lifetime use venue UTC.
+- Staff approval needs a usable venue UTC estimate to record the
+  approval instant. An unsynchronized venue clock refuses approval.
+- A device with an open request receives that request again instead of a
+  new code. The repeat still counts toward the rate limit.
+- `livekit/protocol/auth` stamps the JWT issue, not-before, and expiry
+  claims from the controller system clock. LiveKit checks expiry against
+  its own system clock. The service picks the lifetime from venue UTC.
+  The controller system clock must therefore track venue UTC. How the
+  controller disciplines its system clock remains open.
+- Token issuance accepts only a usable venue estimate. The gateway
+  `venuetime` service needs an adapter to the `VenueClock` interface.
+- Open in later increments: the HTTP API, invitation enrollment with
+  email codes, staff sign-in, persistent storage, retention, challenge
+  rate limiting, and removing a revoked participant from the room.
+
 ## Calendar and scheduling
 
 - Event scheduling gap and overlap rules for recurring local-time
