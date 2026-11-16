@@ -1,0 +1,155 @@
+---
+name: quality-review-pr
+
+# Runs the abuzucom/euler PR quality review after Immutable Compliance
+# completes. Immutable Compliance runs on every pull request event. The
+# path-filtered build workflows may not run at all. workflow_run keeps this
+# caller on default-branch code. Pull request files stay review data. A fork
+# pull request needs the safe-to-review label, a successful compliance run,
+# and manual approval in the fork-review environment.
+#
+# Upgrade: replace the euler commit SHA in every uses: and quality_ref line
+# together.
+
+"on":
+  workflow_run:
+    workflows: [Immutable Compliance]
+    types: [completed]
+
+concurrency:
+  group: quality-review-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: true
+
+# Each job declares only the permissions it uses.
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    if: github.event.workflow_run.event == 'pull_request_target'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      found: ${{ steps.pr.outputs.found }}
+      same_repo: ${{ steps.pr.outputs.same_repo }}
+      fork_review_approved: ${{ steps.pr.outputs.fork_review_approved }}
+      compliance_passed: ${{ steps.pr.outputs.compliance_passed }}
+      number: ${{ steps.pr.outputs.number }}
+      base_sha: ${{ steps.pr.outputs.base_sha }}
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+      title: ${{ steps.pr.outputs.title }}
+      body: ${{ steps.pr.outputs.body }}
+    steps:
+      - name: Resolve pull request from the head revision
+        id: pr
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_NAME: ${{ github.event.workflow_run.name }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        with:
+          script: |
+            const headSha = process.env.HEAD_SHA;
+            const pulls = await github.paginate(github.rest.pulls.list, { ...context.repo, state: 'open' });
+            const matches = pulls.filter((pull) => pull.head.sha === headSha);
+            if (matches.length !== 1) {
+              core.setOutput('found', 'false');
+              return;
+            }
+            const pull = matches[0];
+            core.setOutput('found', 'true');
+            const sameRepo = Boolean(pull.head.repo) && pull.head.repo.full_name === pull.base.repo.full_name;
+            const forkReviewApproved = !sameRepo &&
+              (pull.labels || []).some((label) => label.name === 'safe-to-review');
+            const compliancePassed = process.env.RUN_NAME === 'Immutable Compliance' &&
+              process.env.RUN_CONCLUSION === 'success';
+            core.setOutput('same_repo', String(sameRepo));
+            core.setOutput('fork_review_approved', String(forkReviewApproved));
+            core.setOutput('compliance_passed', String(compliancePassed));
+            core.setOutput('number', String(pull.number));
+            core.setOutput('base_sha', pull.base.sha);
+            core.setOutput('head_sha', pull.head.sha);
+            core.setOutput('title', pull.title || '');
+            core.setOutput('body', pull.body || '');
+
+  review:
+    needs: resolve
+    if: needs.resolve.outputs.found == 'true' && needs.resolve.outputs.same_repo == 'true'
+    # A called workflow can only narrow these grants. The reusable review job
+    # requests each one, including actions: read for its review artifact.
+    permissions:
+      actions: read
+      checks: write
+      contents: read
+      pull-requests: write
+    # Euler 0.9.1.
+    uses: abuzucom/euler/.github/workflows/quality-review.yml@9488a8c5edc2045f2ab44f47bf12fac10f2994a8
+    with:
+      pr_number: ${{ fromJSON(needs.resolve.outputs.number) }}
+      base_sha: ${{ needs.resolve.outputs.base_sha }}
+      head_sha: ${{ needs.resolve.outputs.head_sha }}
+      pr_title: ${{ needs.resolve.outputs.title }}
+      pr_body: ${{ needs.resolve.outputs.body }}
+      quality_ref: "9488a8c5edc2045f2ab44f47bf12fac10f2994a8"
+      fail_on_block: true
+      # Vendored third-party code stays out of the deterministic prescan.
+      exclude_paths: "native/third_party/**"
+    secrets:
+      MODEL_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+
+  fork-review:
+    needs: resolve
+    if: >-
+      needs.resolve.outputs.found == 'true'
+      && needs.resolve.outputs.same_repo != 'true'
+      && needs.resolve.outputs.fork_review_approved == 'true'
+      && needs.resolve.outputs.compliance_passed == 'true'
+    permissions:
+      actions: read
+      checks: write
+      contents: read
+      pull-requests: write
+    # The fork-review environment supplies MODEL_API_KEY after manual
+    # approval. The caller passes no secret on this path.
+    uses: abuzucom/euler/.github/workflows/quality-review.yml@9488a8c5edc2045f2ab44f47bf12fac10f2994a8
+    with:
+      pr_number: ${{ fromJSON(needs.resolve.outputs.number) }}
+      base_sha: ${{ needs.resolve.outputs.base_sha }}
+      head_sha: ${{ needs.resolve.outputs.head_sha }}
+      pr_title: ${{ needs.resolve.outputs.title }}
+      pr_body: ${{ needs.resolve.outputs.body }}
+      quality_ref: "9488a8c5edc2045f2ab44f47bf12fac10f2994a8"
+      fail_on_block: true
+      fork_review: true
+      exclude_paths: "native/third_party/**"
+
+  fork-skip:
+    needs: resolve
+    if: >-
+      needs.resolve.outputs.found == 'true'
+      && needs.resolve.outputs.same_repo != 'true'
+      && (needs.resolve.outputs.fork_review_approved != 'true'
+      || needs.resolve.outputs.compliance_passed != 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+    steps:
+      - name: Publish skip result
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+        with:
+          script: |
+            await github.rest.checks.create({
+              ...context.repo,
+              name: 'quality-review',
+              head_sha: process.env.HEAD_SHA,
+              status: 'completed',
+              conclusion: 'skipped',
+              output: {
+                title: 'Waiting for fork review approval',
+                summary: 'Fork pull requests need the safe-to-review label and a successful Immutable Compliance run.',
+              },
+            });
