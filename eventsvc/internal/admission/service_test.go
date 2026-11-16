@@ -656,3 +656,42 @@ func TestIssueTokenRefusesLargeClockOffset(t *testing.T) {
 		})
 	}
 }
+
+func TestAddEventCopiesGrace(t *testing.T) {
+	f := newFixture(t)
+	grace := time.Hour
+	if err := f.service.AddEvent(Event{ID: "event-2", Start: testEventStart, End: testEventEnd, Grace: &grace}); err != nil {
+		t.Fatalf("AddEvent: %v", err)
+	}
+	// Mutating the caller's value after validation must not change the
+	// stored grace or bypass MaxGrace.
+	grace = 48 * time.Hour
+	device := newTestDevice(t)
+	receipt, err := f.service.RequestAdmission(testSource, device.admissionRequest(t, "event-2"))
+	if err != nil {
+		t.Fatalf("RequestAdmission: %v", err)
+	}
+	admission, err := f.service.Approve("event-2", receipt.Code, testApprover)
+	if err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	if want := testEventEnd.Add(time.Hour); !admission.ValidUntil.Equal(want) {
+		t.Fatalf("valid until %v, want %v", admission.ValidUntil, want)
+	}
+}
+
+func TestMemoryStoreCopiesGrace(t *testing.T) {
+	store := NewMemoryStore()
+	grace := time.Hour
+	store.PutEvent(Event{ID: testEventID, Start: testEventStart, End: testEventEnd, Grace: &grace})
+	grace = 2 * time.Hour
+	stored, ok := store.Event(testEventID)
+	if !ok || stored.Grace == nil || *stored.Grace != time.Hour {
+		t.Fatalf("stored grace changed with the caller's value: %v", stored.Grace)
+	}
+	*stored.Grace = 3 * time.Hour
+	again, _ := store.Event(testEventID)
+	if *again.Grace != time.Hour {
+		t.Fatalf("stored grace changed through a returned event: %v", *again.Grace)
+	}
+}

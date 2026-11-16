@@ -41,12 +41,12 @@ func NewMemoryStore() *MemoryStore {
 // Event returns one event by identifier.
 func (s *MemoryStore) Event(id string) (Event, bool) {
 	event, ok := s.events[id]
-	return event, ok
+	return cloneEvent(event), ok
 }
 
 // PutEvent stores an event, replacing one with the same identifier.
 func (s *MemoryStore) PutEvent(event Event) {
-	s.events[event.ID] = event
+	s.events[event.ID] = cloneEvent(event)
 }
 
 // Requests returns the open requests for one event.
@@ -83,6 +83,16 @@ func (s *MemoryStore) Admission(eventID, deviceID string) (Admission, bool) {
 func (s *MemoryStore) PutAdmission(admission Admission) {
 	admission.PublicKey = slices.Clone(admission.PublicKey)
 	s.admissions[deviceKey{admission.EventID, admission.DeviceID}] = admission
+}
+
+// cloneEvent copies the grace value so stored events share no mutable
+// state with callers. Grace bounds admission validity.
+func cloneEvent(event Event) Event {
+	if event.Grace != nil {
+		grace := *event.Grace
+		event.Grace = &grace
+	}
+	return event
 }
 
 func cloneRequest(request Request) Request {

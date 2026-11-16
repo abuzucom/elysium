@@ -100,6 +100,9 @@ func NewService(cfg Config) (*Service, error) {
 
 // AddEvent registers an event. Start and End are stored as UTC instants.
 func (s *Service) AddEvent(event Event) error {
+	// Copy before validation so the caller cannot change the grace
+	// between the check and the store.
+	event = cloneEvent(event)
 	if err := validateEvent(event); err != nil {
 		return err
 	}
