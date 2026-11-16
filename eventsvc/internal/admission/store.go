@@ -24,8 +24,10 @@ type deviceKey struct {
 // MemoryStore keeps all state in memory. It is not safe for concurrent
 // use outside a Service.
 type MemoryStore struct {
-	events     map[string]Event
-	requests   map[deviceKey]Request
+	events map[string]Event
+	// requests indexes open requests by event, then by device. A lookup
+	// touches only one event's requests.
+	requests   map[string]map[string]Request
 	admissions map[deviceKey]Admission
 }
 
@@ -33,7 +35,7 @@ type MemoryStore struct {
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		events:     make(map[string]Event),
-		requests:   make(map[deviceKey]Request),
+		requests:   make(map[string]map[string]Request),
 		admissions: make(map[deviceKey]Admission),
 	}
 }
@@ -51,23 +53,31 @@ func (s *MemoryStore) PutEvent(event Event) {
 
 // Requests returns the open requests for one event.
 func (s *MemoryStore) Requests(eventID string) []Request {
-	requests := make([]Request, 0)
-	for key, request := range s.requests {
-		if key.eventID == eventID {
-			requests = append(requests, cloneRequest(request))
-		}
+	byDevice := s.requests[eventID]
+	requests := make([]Request, 0, len(byDevice))
+	for _, request := range byDevice {
+		requests = append(requests, cloneRequest(request))
 	}
 	return requests
 }
 
 // PutRequest stores a request, replacing the device's earlier request.
 func (s *MemoryStore) PutRequest(request Request) {
-	s.requests[deviceKey{request.EventID, request.DeviceID}] = cloneRequest(request)
+	byDevice, ok := s.requests[request.EventID]
+	if !ok {
+		byDevice = make(map[string]Request)
+		s.requests[request.EventID] = byDevice
+	}
+	byDevice[request.DeviceID] = cloneRequest(request)
 }
 
 // DeleteRequest removes one device's request for an event.
 func (s *MemoryStore) DeleteRequest(eventID, deviceID string) {
-	delete(s.requests, deviceKey{eventID, deviceID})
+	byDevice := s.requests[eventID]
+	delete(byDevice, deviceID)
+	if len(byDevice) == 0 {
+		delete(s.requests, eventID)
+	}
 }
 
 // Admission returns one device's admission for an event.
