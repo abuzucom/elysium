@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/livekit/protocol/auth"
 )
 
@@ -32,6 +33,12 @@ type Config struct {
 	Clock VenueClock
 	// Monotonic returns elapsed time on a monotonic clock.
 	Monotonic func() time.Duration
+	// SystemClock reads the controller system clock. LiveKit checks token
+	// expiry against this clock. Production code passes time.Now.
+	SystemClock func() time.Time
+	// MaxClockOffset bounds the gap between SystemClock and venue UTC.
+	// A larger gap refuses tokens. The value is experimental.
+	MaxClockOffset time.Duration
 	// Random supplies confirmation codes and challenges. Production code
 	// passes crypto/rand.Reader.
 	Random io.Reader
@@ -48,6 +55,10 @@ func (cfg Config) validate() error {
 		return fmt.Errorf("%w: venue clock is required", ErrInvalidArgument)
 	case cfg.Monotonic == nil:
 		return fmt.Errorf("%w: monotonic clock is required", ErrInvalidArgument)
+	case cfg.SystemClock == nil:
+		return fmt.Errorf("%w: system clock is required", ErrInvalidArgument)
+	case cfg.MaxClockOffset <= 0:
+		return fmt.Errorf("%w: maximum clock offset must be positive", ErrInvalidArgument)
 	case cfg.Random == nil:
 		return fmt.Errorf("%w: random source is required", ErrInvalidArgument)
 	case cfg.Store == nil:
@@ -290,11 +301,47 @@ func (s *Service) IssueToken(request TokenRequest) (Token, error) {
 	if admission.Revoked {
 		return Token{}, ErrRevoked
 	}
-	lifetime, err := tokenLifetime(s.cfg.Clock.Now(), admission.ValidUntil)
+	window, err := s.tokenWindow(admission.ValidUntil)
 	if err != nil {
 		return Token{}, err
 	}
-	return s.signToken(request.EventID, deviceID, lifetime)
+	return s.signToken(request.EventID, deviceID, window)
+}
+
+// tokenWindow holds the venue UTC claims for one token.
+type tokenWindow struct {
+	notBefore time.Time
+	expiresAt time.Time
+	validFor  time.Duration
+}
+
+// tokenWindow stamps token claims from venue UTC. LiveKit compares the
+// expiry claim with the controller system clock. A lagging system clock
+// would keep the token valid past the venue expiry, so the lag shortens
+// the expiry. A leading system clock only ends the token early. The
+// not-before claim takes the earlier clock reading, so a lagging system
+// clock accepts the token at once.
+func (s *Service) tokenWindow(validUntil time.Time) (tokenWindow, error) {
+	venue := s.cfg.Clock.Now()
+	lifetime, err := tokenLifetime(venue, validUntil)
+	if err != nil {
+		return tokenWindow{}, err
+	}
+	system := s.cfg.SystemClock()
+	offset := system.Sub(venue.UTC)
+	if offset > s.cfg.MaxClockOffset || offset < -s.cfg.MaxClockOffset {
+		return tokenWindow{}, fmt.Errorf("%w: offset %v exceeds %v", ErrClockOffset, offset, s.cfg.MaxClockOffset)
+	}
+	lag := max(0, -offset)
+	// The JWT claims have whole-second precision. Truncation moves the
+	// expiry earlier and the start earlier, never later.
+	expiresAt := venue.UTC.Add(lifetime - lag).Truncate(time.Second)
+	notBefore := venue.UTC.Add(-lag).Truncate(time.Second)
+	validFor := expiresAt.Sub(venue.UTC)
+	if validFor < MinTokenLifetime {
+		return tokenWindow{}, ErrAdmissionExpired
+	}
+	return tokenWindow{notBefore: notBefore, expiresAt: expiresAt, validFor: validFor}, nil
 }
 
 // tokenLifetime applies the approved lifetime rules. The latest possible
@@ -320,7 +367,13 @@ func tokenLifetime(venue VenueTime, validUntil time.Time) (time.Duration, error)
 	return lifetime, nil
 }
 
-func (s *Service) signToken(room, identity string, lifetime time.Duration) (Token, error) {
+// listenerClaims matches the claim layout LiveKit verifies.
+type listenerClaims struct {
+	jwt.RegisteredClaims
+	auth.ClaimGrants
+}
+
+func (s *Service) signToken(room, identity string, window tokenWindow) (Token, error) {
 	allow, deny := true, false
 	grant := &auth.VideoGrant{
 		RoomJoin:             true,
@@ -330,20 +383,26 @@ func (s *Service) signToken(room, identity string, lifetime time.Duration) (Toke
 		CanPublishData:       &deny,
 		CanUpdateOwnMetadata: &deny,
 	}
-	jwt, err := auth.NewAccessToken(s.cfg.LiveKitAPIKey, s.cfg.LiveKitAPISecret).
-		SetIdentity(identity).
-		SetValidFor(lifetime).
-		SetVideoGrant(grant).
-		ToJWT()
+	claims := listenerClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    s.cfg.LiveKitAPIKey,
+			Subject:   identity,
+			IssuedAt:  jwt.NewNumericDate(window.notBefore),
+			NotBefore: jwt.NewNumericDate(window.notBefore),
+			ExpiresAt: jwt.NewNumericDate(window.expiresAt),
+		},
+		ClaimGrants: auth.ClaimGrants{Identity: identity, Video: grant},
+	}
+	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(s.cfg.LiveKitAPISecret))
 	if err != nil {
 		return Token{}, fmt.Errorf("sign listener token: %w", err)
 	}
 	return Token{
-		JWT:          jwt,
+		JWT:          signed,
 		Room:         room,
 		Identity:     identity,
-		ValidFor:     lifetime,
-		RefreshAfter: min(TokenRefreshAfter, lifetime/2),
+		ValidFor:     window.validFor,
+		RefreshAfter: min(TokenRefreshAfter, window.validFor/2),
 	}, nil
 }
 

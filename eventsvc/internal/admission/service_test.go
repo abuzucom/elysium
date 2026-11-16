@@ -17,6 +17,8 @@ func TestNewServiceRejectsMissingConfiguration(t *testing.T) {
 	valid := Config{
 		Clock:            clock,
 		Monotonic:        clock.Monotonic,
+		SystemClock:      clock.System,
+		MaxClockOffset:   testMaxClockOffset,
 		Random:           zeroReader{},
 		Store:            NewMemoryStore(),
 		LiveKitAPIKey:    testAPIKey,
@@ -25,6 +27,8 @@ func TestNewServiceRejectsMissingConfiguration(t *testing.T) {
 	cases := map[string]func(*Config){
 		"clock":     func(c *Config) { c.Clock = nil },
 		"monotonic": func(c *Config) { c.Monotonic = nil },
+		"system":    func(c *Config) { c.SystemClock = nil },
+		"offset":    func(c *Config) { c.MaxClockOffset = 0 },
 		"random":    func(c *Config) { c.Random = nil },
 		"store":     func(c *Config) { c.Store = nil },
 		"api key":   func(c *Config) { c.LiveKitAPIKey = "" },
@@ -308,20 +312,17 @@ func TestIssueTokenGrantsSubscribeOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseAPIToken: %v", err)
 	}
-	if verifier.APIKey() != testAPIKey {
-		t.Fatalf("api key %q, want %q", verifier.APIKey(), testAPIKey)
+	if verifier.APIKey() != testAPIKey || verifier.Identity() != DeviceID(device.der) {
+		t.Fatalf("api key %q identity %q", verifier.APIKey(), verifier.Identity())
 	}
-	claims, grants, err := verifier.Verify(testAPISecret)
-	if err != nil {
-		t.Fatalf("Verify: %v", err)
-	}
+	claims := mustDecodeToken(t, token.JWT, f.clock.System())
 	if lifetime := claims.ExpiresAt.Sub(claims.NotBefore.Time); lifetime != TokenLifetime {
 		t.Fatalf("jwt lifetime %v, want %v", lifetime, TokenLifetime)
 	}
-	if grants.Identity != DeviceID(device.der) {
-		t.Fatalf("identity %q, want device id", grants.Identity)
+	if claims.Identity != DeviceID(device.der) {
+		t.Fatalf("identity %q, want device id", claims.Identity)
 	}
-	video := grants.Video
+	video := claims.Video
 	if video == nil || !video.RoomJoin || video.Room != testEventID {
 		t.Fatalf("video grant %+v does not join only the event room", video)
 	}
@@ -505,5 +506,78 @@ func TestRevokeRequiresAdmission(t *testing.T) {
 	f := newFixture(t)
 	if err := f.service.Revoke(testEventID, "missing"); !errors.Is(err, ErrNoAdmission) {
 		t.Fatalf("error = %v, want ErrNoAdmission", err)
+	}
+}
+
+func TestIssueTokenStampsVenueTime(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	f.admit(t, device)
+	venue := f.clock.Now().UTC
+	token, err := f.token(t, device)
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+	claims := mustDecodeToken(t, token.JWT, venue)
+	if !claims.IssuedAt.Equal(venue) || !claims.NotBefore.Equal(venue) {
+		t.Fatalf("iat %v nbf %v, want venue UTC %v", claims.IssuedAt, claims.NotBefore, venue)
+	}
+	if want := venue.Add(TokenLifetime); !claims.ExpiresAt.Equal(want) {
+		t.Fatalf("exp %v, want %v", claims.ExpiresAt, want)
+	}
+}
+
+func TestIssueTokenNeverOutlastsAdmissionWhenSystemClockLags(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	admission := f.admit(t, device)
+	lag := 3 * time.Second
+	f.clock.set(synchronizedAt(admission.ValidUntil.Add(-20 * time.Minute)))
+	f.clock.setSkew(-lag)
+	issuedAt := f.clock.System()
+	token, err := f.token(t, device)
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+	// The token must verify at issue time on the lagging system clock.
+	mustDecodeToken(t, token.JWT, issuedAt)
+	// LiveKit compares exp with the lagging system clock. When venue UTC
+	// reaches ValidUntil, that clock reads ValidUntil minus the lag.
+	if _, err := decodeToken(t, token.JWT, admission.ValidUntil.Add(-lag)); !isExpired(err) {
+		t.Fatalf("token still valid at admission end on the lagging clock: %v", err)
+	}
+}
+
+func TestIssueTokenNeverOutlastsAdmissionWhenSystemClockLeads(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	admission := f.admit(t, device)
+	lead := 4 * time.Second
+	f.clock.set(synchronizedAt(admission.ValidUntil.Add(-20 * time.Minute)))
+	f.clock.setSkew(lead)
+	token, err := f.token(t, device)
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+	mustDecodeToken(t, token.JWT, f.clock.System())
+	if _, err := decodeToken(t, token.JWT, admission.ValidUntil.Add(lead)); !isExpired(err) {
+		t.Fatalf("token still valid at admission end on the leading clock: %v", err)
+	}
+}
+
+func TestIssueTokenRefusesLargeClockOffset(t *testing.T) {
+	for name, skew := range map[string]time.Duration{
+		"lagging": -testMaxClockOffset - time.Second,
+		"leading": testMaxClockOffset + time.Second,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			device := newTestDevice(t)
+			f.admit(t, device)
+			f.clock.setSkew(skew)
+			if _, err := f.token(t, device); !errors.Is(err, ErrClockOffset) {
+				t.Fatalf("error = %v, want ErrClockOffset", err)
+			}
+		})
 	}
 }

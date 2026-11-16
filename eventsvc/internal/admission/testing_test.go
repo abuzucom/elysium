@@ -6,10 +6,13 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"errors"
 	"net/netip"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 const (
@@ -17,6 +20,8 @@ const (
 	testAPISecret = "test-secret-with-at-least-32-bytes-0123"
 	testEventID   = "event-1"
 	testApprover  = "staff-1"
+	// testMaxClockOffset is the tolerated system clock offset in tests.
+	testMaxClockOffset = 5 * time.Second
 )
 
 var (
@@ -25,11 +30,29 @@ var (
 	testSource     = netip.MustParseAddr("10.10.0.5")
 )
 
-// fakeClock is a venue clock and a monotonic clock under test control.
+// fakeClock is a venue clock, a system clock, and a monotonic clock under
+// test control. The system clock reads venue UTC plus skew. Without venue
+// UTC it reads a fixed base plus monotonic time.
 type fakeClock struct {
 	mu        sync.Mutex
 	venue     VenueTime
 	monotonic time.Duration
+	skew      time.Duration
+}
+
+func (c *fakeClock) System() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.venue.UTC.IsZero() {
+		return testEventStart.Add(c.monotonic)
+	}
+	return c.venue.UTC.Add(c.skew)
+}
+
+func (c *fakeClock) setSkew(skew time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.skew = skew
 }
 
 func (c *fakeClock) Now() VenueTime {
@@ -136,6 +159,8 @@ func newFixtureWithRandom(t *testing.T, random interface{ Read([]byte) (int, err
 	service, err := NewService(Config{
 		Clock:            clock,
 		Monotonic:        clock.Monotonic,
+		SystemClock:      clock.System,
+		MaxClockOffset:   testMaxClockOffset,
 		Random:           random,
 		Store:            NewMemoryStore(),
 		LiveKitAPIKey:    testAPIKey,
@@ -172,4 +197,34 @@ func (f fixture) token(t *testing.T, device testDevice) (Token, error) {
 		t.Fatalf("Challenge: %v", err)
 	}
 	return f.service.IssueToken(device.tokenRequest(t, testEventID, challenge))
+}
+
+// decodeToken verifies a listener token as LiveKit would at the given
+// system time.
+func decodeToken(t *testing.T, raw string, at time.Time) (*listenerClaims, error) {
+	t.Helper()
+	claims := &listenerClaims{}
+	_, err := jwt.ParseWithClaims(raw, claims, func(*jwt.Token) (any, error) {
+		return []byte(testAPISecret), nil
+	},
+		jwt.WithValidMethods([]string{"HS256"}),
+		jwt.WithIssuer(testAPIKey),
+		jwt.WithExpirationRequired(),
+		jwt.WithTimeFunc(func() time.Time { return at }),
+	)
+	return claims, err
+}
+
+// mustDecodeToken decodes a token that must verify at the given time.
+func mustDecodeToken(t *testing.T, raw string, at time.Time) *listenerClaims {
+	t.Helper()
+	claims, err := decodeToken(t, raw, at)
+	if err != nil {
+		t.Fatalf("decode token at %v: %v", at, err)
+	}
+	return claims
+}
+
+func isExpired(err error) bool {
+	return errors.Is(err, jwt.ErrTokenExpired)
 }

@@ -177,11 +177,13 @@ These Gate 0 findings remain unverified.
   approval instant. An unsynchronized venue clock refuses approval.
 - A device with an open request receives that request again instead of a
   new code. The repeat still counts toward the rate limit.
-- `livekit/protocol/auth` stamps the JWT issue, not-before, and expiry
-  claims from the controller system clock. LiveKit checks expiry against
-  its own system clock. The service picks the lifetime from venue UTC.
-  The controller system clock must therefore track venue UTC. How the
-  controller disciplines its system clock remains open.
+- The service signs listener tokens itself and stamps the JWT issue,
+  not-before, and expiry claims from venue UTC. LiveKit checks expiry
+  against the controller system clock. A system clock behind venue UTC
+  shortens the expiry by the lag. A system clock ahead only ends the
+  token early. A gap beyond `MaxClockOffset` refuses tokens. The
+  deployment value of `MaxClockOffset` remains open. How the controller
+  disciplines its system clock also remains open.
 - Token issuance accepts only a usable venue estimate. The gateway
   `venuetime` service needs an adapter to the `VenueClock` interface.
 - Open in later increments: the HTTP API, invitation enrollment with

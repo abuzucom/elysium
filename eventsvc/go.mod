@@ -2,7 +2,10 @@ module github.com/abuzucom/elysium/eventsvc
 
 go 1.26.8
 
-require github.com/livekit/protocol v1.51.1-0.20260910121219-271d9cde3897
+require (
+	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/livekit/protocol v1.51.1-0.20260910121219-271d9cde3897
+)
 
 require (
 	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.11-20260415201107-50325440f8f2.1 // indirect
@@ -18,7 +21,6 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/gammazero/deque v1.2.1 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
-	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/cel-go v0.29.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jxskiss/base62 v1.1.0 // indirect
