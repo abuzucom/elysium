@@ -178,17 +178,26 @@ These Gate 0 findings remain unverified.
 - A device with an open request receives that request again instead of a
   new code. The repeat still counts toward the rate limit.
 - The service signs listener tokens itself and stamps the JWT issue,
-  not-before, and expiry claims from venue UTC. LiveKit checks expiry
-  against the controller system clock. A system clock behind venue UTC
-  shortens the expiry by the lag. A system clock ahead only ends the
-  token early. A gap beyond `MaxClockOffset` refuses tokens. The
-  deployment value of `MaxClockOffset` remains open. How the controller
-  disciplines its system clock also remains open.
+  not-before, and expiry claims from venue UTC. LiveKit checks the
+  claims against the controller system clock. Every claim moves back by
+  the full `MaxClockOffset`. A system clock lagging by up to that bound
+  at any time during the token lifetime still rejects the token by the
+  venue expiry. A system clock ahead only ends the token early. A gap
+  beyond `MaxClockOffset` at issue refuses tokens.
+- Deployment requirement: the controller system clock must stay within
+  `MaxClockOffset` of venue UTC for every token lifetime. The value must
+  stay below the 60-second minimum token lifetime. The deployment value
+  and how the controller disciplines its system clock remain open.
+- Planned by human decision (2026-11-16): the event service removes a
+  participant from the LiveKit room when its admission ends or is
+  revoked. Room removal enforces the admission end even when the
+  controller clock leaves its bound. It needs the LiveKit room service
+  API in a later increment.
 - Token issuance accepts only a usable venue estimate. The gateway
   `venuetime` service needs an adapter to the `VenueClock` interface.
 - Open in later increments: the HTTP API, invitation enrollment with
-  email codes, staff sign-in, persistent storage, retention, challenge
-  rate limiting, and removing a revoked participant from the room.
+  email codes, staff sign-in, persistent storage, retention, and
+  challenge rate limiting.
 
 ## Calendar and scheduling
 

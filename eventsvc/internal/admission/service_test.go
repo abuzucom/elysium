@@ -519,10 +519,14 @@ func TestIssueTokenStampsVenueTime(t *testing.T) {
 		t.Fatalf("IssueToken: %v", err)
 	}
 	claims := mustDecodeToken(t, token.JWT, venue)
-	if !claims.IssuedAt.Equal(venue) || !claims.NotBefore.Equal(venue) {
-		t.Fatalf("iat %v nbf %v, want venue UTC %v", claims.IssuedAt, claims.NotBefore, venue)
+	// Both claims move back by the full tolerated offset. A system clock
+	// lagging by up to that offset accepts the token at once and rejects
+	// it no later than the venue expiry.
+	start := venue.Add(-testMaxClockOffset)
+	if !claims.IssuedAt.Equal(start) || !claims.NotBefore.Equal(start) {
+		t.Fatalf("iat %v nbf %v, want %v", claims.IssuedAt, claims.NotBefore, start)
 	}
-	if want := venue.Add(TokenLifetime); !claims.ExpiresAt.Equal(want) {
+	if want := venue.Add(TokenLifetime - testMaxClockOffset); !claims.ExpiresAt.Equal(want) {
 		t.Fatalf("exp %v, want %v", claims.ExpiresAt, want)
 	}
 }
@@ -540,11 +544,82 @@ func TestIssueTokenNeverOutlastsAdmissionWhenSystemClockLags(t *testing.T) {
 		t.Fatalf("IssueToken: %v", err)
 	}
 	// The token must verify at issue time on the lagging system clock.
-	mustDecodeToken(t, token.JWT, issuedAt)
+	claims := mustDecodeToken(t, token.JWT, issuedAt)
 	// LiveKit compares exp with the lagging system clock. When venue UTC
 	// reaches ValidUntil, that clock reads ValidUntil minus the lag.
 	if _, err := decodeToken(t, token.JWT, admission.ValidUntil.Add(-lag)); !isExpired(err) {
 		t.Fatalf("token still valid at admission end on the lagging clock: %v", err)
+	}
+	// The reported lifetime matches the signed claim interval.
+	if interval := claims.ExpiresAt.Sub(claims.NotBefore.Time); token.ValidFor != interval {
+		t.Fatalf("valid for %v, want the claim interval %v", token.ValidFor, interval)
+	}
+	if want := token.ValidFor / 2; token.RefreshAfter != want {
+		t.Fatalf("refresh after %v, want %v", token.RefreshAfter, want)
+	}
+}
+
+func TestIssueTokenFullLifetimeWhenSystemClockLags(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	f.admit(t, device)
+	f.clock.setSkew(-3 * time.Second)
+	token, err := f.token(t, device)
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+	if token.ValidFor != TokenLifetime || token.RefreshAfter != TokenRefreshAfter {
+		t.Fatalf("valid for %v refresh after %v, want %v and %v",
+			token.ValidFor, token.RefreshAfter, TokenLifetime, TokenRefreshAfter)
+	}
+}
+
+func TestIssueTokenNeverOutlastsAdmissionWhenClockDriftsAfterIssue(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	admission := f.admit(t, device)
+	f.clock.set(synchronizedAt(admission.ValidUntil.Add(-20 * time.Minute)))
+	token, err := f.token(t, device)
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+	// After issue, the system clock falls behind by the full tolerated
+	// offset. LiveKit must still reject the token by the admission end.
+	if _, err := decodeToken(t, token.JWT, admission.ValidUntil.Add(-testMaxClockOffset)); !isExpired(err) {
+		t.Fatalf("token still valid at admission end after drift: %v", err)
+	}
+}
+
+func TestIssueTokenRejectsOversizedChallenge(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	f.admit(t, device)
+	oversized := make([]byte, 1<<20)
+	if _, err := f.service.IssueToken(device.tokenRequest(t, testEventID, oversized)); !errors.Is(err, ErrChallengeInvalid) {
+		t.Fatalf("error = %v, want ErrChallengeInvalid", err)
+	}
+	allocations := testing.AllocsPerRun(10, func() {
+		_, _ = f.service.IssueToken(TokenRequest{EventID: testEventID, Challenge: oversized})
+	})
+	if allocations > 0 {
+		t.Fatalf("oversized challenge allocated %v times per call", allocations)
+	}
+}
+
+func TestNewServiceRejectsOffsetAtOrAboveMinimumLifetime(t *testing.T) {
+	clock := &fakeClock{}
+	_, err := NewService(Config{
+		Clock:            clock,
+		Monotonic:        clock.Monotonic,
+		SystemClock:      clock.System,
+		MaxClockOffset:   MinTokenLifetime,
+		Random:           zeroReader{},
+		Store:            NewMemoryStore(),
+		LiveKitAPIKey:    testAPIKey,
+		LiveKitAPISecret: testAPISecret,
+	})
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("NewService error = %v, want ErrInvalidArgument", err)
 	}
 }
 

@@ -37,7 +37,9 @@ type Config struct {
 	// expiry against this clock. Production code passes time.Now.
 	SystemClock func() time.Time
 	// MaxClockOffset bounds the gap between SystemClock and venue UTC.
-	// A larger gap refuses tokens. The value is experimental.
+	// A larger gap at issue refuses tokens. The deployment must keep the
+	// controller system clock within this bound for every token lifetime.
+	// It must stay below MinTokenLifetime. The value is experimental.
 	MaxClockOffset time.Duration
 	// Random supplies confirmation codes and challenges. Production code
 	// passes crypto/rand.Reader.
@@ -57,8 +59,8 @@ func (cfg Config) validate() error {
 		return fmt.Errorf("%w: monotonic clock is required", ErrInvalidArgument)
 	case cfg.SystemClock == nil:
 		return fmt.Errorf("%w: system clock is required", ErrInvalidArgument)
-	case cfg.MaxClockOffset <= 0:
-		return fmt.Errorf("%w: maximum clock offset must be positive", ErrInvalidArgument)
+	case cfg.MaxClockOffset <= 0 || cfg.MaxClockOffset >= MinTokenLifetime:
+		return fmt.Errorf("%w: maximum clock offset must be positive and below %v", ErrInvalidArgument, MinTokenLifetime)
 	case cfg.Random == nil:
 		return fmt.Errorf("%w: random source is required", ErrInvalidArgument)
 	case cfg.Store == nil:
@@ -271,6 +273,11 @@ func (s *Service) sweepChallenges(now time.Duration) {
 // consumeChallenge removes a challenge and reports whether it was valid
 // for the event. Any lookup consumes the challenge.
 func (s *Service) consumeChallenge(eventID string, value []byte) bool {
+	// Generated challenges are exactly challengeBytes long. Rejecting any
+	// other length first bounds work on untrusted input.
+	if len(value) != challengeBytes {
+		return false
+	}
 	key := hex.EncodeToString(value)
 	entry, ok := s.challenges[key]
 	if !ok {
@@ -312,15 +319,17 @@ func (s *Service) IssueToken(request TokenRequest) (Token, error) {
 type tokenWindow struct {
 	notBefore time.Time
 	expiresAt time.Time
-	validFor  time.Duration
+	// validFor is the signed claim interval.
+	validFor time.Duration
 }
 
 // tokenWindow stamps token claims from venue UTC. LiveKit compares the
-// expiry claim with the controller system clock. A lagging system clock
-// would keep the token valid past the venue expiry, so the lag shortens
-// the expiry. A leading system clock only ends the token early. The
-// not-before claim takes the earlier clock reading, so a lagging system
-// clock accepts the token at once.
+// claims with the controller system clock, which may lag venue UTC by up
+// to MaxClockOffset at any time during the token lifetime. Both claims
+// therefore move back by the full bound. A lagging clock accepts the
+// token at once and still rejects it by the venue expiry. A leading clock
+// only ends the token early. The offset check at issue catches a clock
+// already outside the bound.
 func (s *Service) tokenWindow(validUntil time.Time) (tokenWindow, error) {
 	venue := s.cfg.Clock.Now()
 	lifetime, err := tokenLifetime(venue, validUntil)
@@ -332,16 +341,11 @@ func (s *Service) tokenWindow(validUntil time.Time) (tokenWindow, error) {
 	if offset > s.cfg.MaxClockOffset || offset < -s.cfg.MaxClockOffset {
 		return tokenWindow{}, fmt.Errorf("%w: offset %v exceeds %v", ErrClockOffset, offset, s.cfg.MaxClockOffset)
 	}
-	lag := max(0, -offset)
 	// The JWT claims have whole-second precision. Truncation moves the
 	// expiry earlier and the start earlier, never later.
-	expiresAt := venue.UTC.Add(lifetime - lag).Truncate(time.Second)
-	notBefore := venue.UTC.Add(-lag).Truncate(time.Second)
-	validFor := expiresAt.Sub(venue.UTC)
-	if validFor < MinTokenLifetime {
-		return tokenWindow{}, ErrAdmissionExpired
-	}
-	return tokenWindow{notBefore: notBefore, expiresAt: expiresAt, validFor: validFor}, nil
+	notBefore := venue.UTC.Add(-s.cfg.MaxClockOffset).Truncate(time.Second)
+	expiresAt := venue.UTC.Add(lifetime - s.cfg.MaxClockOffset).Truncate(time.Second)
+	return tokenWindow{notBefore: notBefore, expiresAt: expiresAt, validFor: expiresAt.Sub(notBefore)}, nil
 }
 
 // tokenLifetime applies the approved lifetime rules. The latest possible
