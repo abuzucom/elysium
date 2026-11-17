@@ -12,21 +12,39 @@ const rateSweepThreshold = 1024
 // rateLimiter counts events per source address in a sliding window. The
 // caller serializes access.
 type rateLimiter struct {
-	limit   int
-	window  time.Duration
-	history map[netip.Addr][]time.Duration
+	limit  int
+	window time.Duration
+	// maxAddresses caps the tracked addresses.
+	maxAddresses int
+	history      map[netip.Addr][]time.Duration
 }
 
-func newRateLimiter(limit int, window time.Duration) *rateLimiter {
-	return &rateLimiter{limit: limit, window: window, history: make(map[netip.Addr][]time.Duration)}
+func newRateLimiter(limit int, window time.Duration, maxAddresses int) *rateLimiter {
+	return &rateLimiter{
+		limit:        limit,
+		window:       window,
+		maxAddresses: maxAddresses,
+		history:      make(map[netip.Addr][]time.Duration),
+	}
 }
 
 // allow records one event at now and reports whether it fits the limit.
+// An untracked address is rejected while the limiter tracks maxAddresses
+// active addresses. Tracked addresses keep their own limit.
 func (r *rateLimiter) allow(address netip.Addr, now time.Duration) bool {
 	if len(r.history) > rateSweepThreshold {
 		r.sweep(now)
 	}
-	recent := r.recent(r.history[address], now)
+	stamps, tracked := r.history[address]
+	if !tracked && len(r.history) >= r.maxAddresses {
+		// Idle addresses do not hold a slot. The sweep frees them
+		// whatever the threshold.
+		r.sweep(now)
+		if len(r.history) >= r.maxAddresses {
+			return false
+		}
+	}
+	recent := r.recent(stamps, now)
 	if len(recent) >= r.limit {
 		r.history[address] = recent
 		return false

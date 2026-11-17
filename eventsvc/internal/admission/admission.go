@@ -39,6 +39,23 @@ const (
 	MaxOutstandingChallenges = 4096
 	// MinTokenLifetime is the shortest token the service issues.
 	MinTokenLifetime = time.Minute
+	// ChallengeRateLimit caps challenges per source address within
+	// ChallengeRateWindow. The window matches ChallengeLifetime, so one
+	// address holds at most ChallengeRateLimit outstanding challenges.
+	ChallengeRateLimit  = 10
+	ChallengeRateWindow = ChallengeLifetime
+	// MaxEventChallenges caps outstanding challenges for one event. One
+	// event cannot take the whole pool from other events.
+	MaxEventChallenges = MaxOutstandingChallenges / 2
+	// MaxOpenRequests caps open admission requests for one event. It
+	// bounds store growth and keeps the six-digit code space sparse.
+	MaxOpenRequests = 1000
+	// MaxTrackedAddresses caps the source addresses one rate limiter
+	// tracks. New addresses past the cap are rejected.
+	MaxTrackedAddresses = 4096
+	// MinLiveKitSecretBytes is the shortest accepted LiveKit API secret.
+	// HS256 signing keys need at least 256 bits.
+	MinLiveKitSecretBytes = 32
 )
 
 // Errors returned by the service. Callers match them with errors.Is.
@@ -47,6 +64,8 @@ var (
 	ErrUnknownEvent         = errors.New("unknown event")
 	ErrBadSignature         = errors.New("device signature does not verify")
 	ErrRateLimited          = errors.New("too many admission requests from this address")
+	ErrTooManyRequests      = errors.New("too many open admission requests for this event")
+	ErrChallengeRateLimited = errors.New("too many challenges from this address")
 	ErrCodeSpaceExhausted   = errors.New("no unique confirmation code available")
 	ErrRequestNotFound      = errors.New("no open admission request matches")
 	ErrVenueTimeUnavailable = errors.New("venue time is not usable")
