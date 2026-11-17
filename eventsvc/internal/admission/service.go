@@ -65,8 +65,10 @@ func (cfg Config) validate() error {
 		return fmt.Errorf("%w: random source is required", ErrInvalidArgument)
 	case cfg.Store == nil:
 		return fmt.Errorf("%w: store is required", ErrInvalidArgument)
-	case cfg.LiveKitAPIKey == "" || cfg.LiveKitAPISecret == "":
-		return fmt.Errorf("%w: LiveKit API key and secret are required", ErrInvalidArgument)
+	case cfg.LiveKitAPIKey == "":
+		return fmt.Errorf("%w: LiveKit API key is required", ErrInvalidArgument)
+	case len(cfg.LiveKitAPISecret) < MinLiveKitSecretBytes:
+		return fmt.Errorf("%w: LiveKit API secret needs at least %d bytes", ErrInvalidArgument, MinLiveKitSecretBytes)
 	}
 	return nil
 }
@@ -81,9 +83,14 @@ type challenge struct {
 type Service struct {
 	cfg Config
 
-	mu         sync.Mutex
-	limiter    *rateLimiter
-	challenges map[string]challenge
+	mu sync.Mutex
+	// limiter counts admission requests per source address.
+	limiter *rateLimiter
+	// challengeLimiter counts challenges per source address.
+	challengeLimiter *rateLimiter
+	challenges       map[string]challenge
+	// eventChallenges counts outstanding challenges per event.
+	eventChallenges map[string]int
 }
 
 // NewService validates the configuration and returns a Service.
@@ -92,9 +99,11 @@ func NewService(cfg Config) (*Service, error) {
 		return nil, err
 	}
 	return &Service{
-		cfg:        cfg,
-		limiter:    newRateLimiter(RequestRateLimit, RequestRateWindow),
-		challenges: make(map[string]challenge),
+		cfg:              cfg,
+		limiter:          newRateLimiter(RequestRateLimit, RequestRateWindow, MaxTrackedAddresses),
+		challengeLimiter: newRateLimiter(ChallengeRateLimit, ChallengeRateWindow, MaxTrackedAddresses),
+		challenges:       make(map[string]challenge),
+		eventChallenges:  make(map[string]int),
 	}, nil
 }
 
@@ -156,6 +165,11 @@ func (s *Service) RequestAdmission(source netip.Addr, request SignedRequest) (Re
 		if existing.DeviceID == deviceID {
 			return receiptFor(existing, now), nil
 		}
+	}
+	// The cap applies only to new requests. A device with an open request
+	// above still receives it.
+	if len(open) >= MaxOpenRequests {
+		return RequestReceipt{}, ErrTooManyRequests
 	}
 	code, err := s.uniqueCode(open)
 	if err != nil {
@@ -241,16 +255,22 @@ func (s *Service) Revoke(eventID, deviceID string) error {
 	return nil
 }
 
-// Challenge returns a single-use random challenge bound to one event.
-func (s *Service) Challenge(eventID string) ([]byte, error) {
+// Challenge returns a single-use random challenge bound to one event. A
+// per-source quota and a per-event cap keep one caller from taking the
+// whole challenge pool.
+func (s *Service) Challenge(source netip.Addr, eventID string) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.cfg.Monotonic()
+	// The quota runs first, so rejected calls still cost the sender.
+	if !s.challengeLimiter.allow(source, now) {
+		return nil, ErrChallengeRateLimited
+	}
 	if _, err := s.event(eventID); err != nil {
 		return nil, err
 	}
-	now := s.cfg.Monotonic()
 	s.sweepChallenges(now)
-	if len(s.challenges) >= MaxOutstandingChallenges {
+	if len(s.challenges) >= MaxOutstandingChallenges || s.eventChallenges[eventID] >= MaxEventChallenges {
 		return nil, ErrTooManyChallenges
 	}
 	value := make([]byte, challengeBytes)
@@ -258,6 +278,7 @@ func (s *Service) Challenge(eventID string) ([]byte, error) {
 		return nil, fmt.Errorf("read challenge randomness: %w", err)
 	}
 	s.challenges[hex.EncodeToString(value)] = challenge{eventID: eventID, expiresAt: now + ChallengeLifetime}
+	s.eventChallenges[eventID]++
 	return value, nil
 }
 
@@ -269,8 +290,23 @@ func (s *Service) sweepChallenges(now time.Duration) {
 		}
 	}
 	for _, key := range expired {
-		delete(s.challenges, key)
+		s.removeChallenge(key)
 	}
+}
+
+// removeChallenge deletes one challenge and releases its event slot.
+func (s *Service) removeChallenge(key string) {
+	entry, ok := s.challenges[key]
+	if !ok {
+		return
+	}
+	delete(s.challenges, key)
+	remaining := s.eventChallenges[entry.eventID] - 1
+	if remaining <= 0 {
+		delete(s.eventChallenges, entry.eventID)
+		return
+	}
+	s.eventChallenges[entry.eventID] = remaining
 }
 
 // consumeChallenge removes a challenge and reports whether it was valid
@@ -286,7 +322,7 @@ func (s *Service) consumeChallenge(eventID string, value []byte) bool {
 	if !ok {
 		return false
 	}
-	delete(s.challenges, key)
+	s.removeChallenge(key)
 	return entry.eventID == eventID && s.cfg.Monotonic() < entry.expiresAt
 }
 

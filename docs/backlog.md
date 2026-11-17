@@ -171,6 +171,20 @@ These Gate 0 findings remain unverified.
   constants in `eventsvc/internal/admission`.
 - The rate limiter sweeps idle source addresses once it tracks more than
   1024 of them.
+- Each rate limiter tracks at most 4096 source addresses with activity
+  inside its window. A new address past that cap is rejected until idle
+  addresses age out. Tracked addresses keep their own limit.
+- Challenges carry a per-source quota of 10 per 60-second window, equal
+  to the challenge lifetime. One address therefore holds at most 10
+  outstanding challenges. `Challenge` takes the source address.
+- One event holds at most 2048 outstanding challenges, half of the
+  4096 pool. One event cannot lock out listeners of another event.
+- One event holds at most 1000 open admission requests. Requests past
+  the cap are rejected. A device with an open request still receives
+  it. The cap bounds store growth and keeps the six-digit code space
+  sparse.
+- The LiveKit API secret must hold at least 32 bytes, the HS256 key
+  size.
 - Request expiry, challenge expiry, and rate windows use a monotonic
   clock. Admission validity and token lifetime use venue UTC.
 - Staff approval needs a usable venue UTC estimate to record the
@@ -196,8 +210,7 @@ These Gate 0 findings remain unverified.
 - Token issuance accepts only a usable venue estimate. The gateway
   `venuetime` service needs an adapter to the `VenueClock` interface.
 - Open in later increments: the HTTP API, invitation enrollment with
-  email codes, staff sign-in, persistent storage, retention, and
-  challenge rate limiting.
+  email codes, staff sign-in, persistent storage, and retention.
 
 ## Calendar and scheduling
 

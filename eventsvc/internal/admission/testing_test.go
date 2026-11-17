@@ -192,7 +192,7 @@ func (f fixture) admit(t *testing.T, device testDevice) Admission {
 // token runs the challenge and token flow for one admitted device.
 func (f fixture) token(t *testing.T, device testDevice) (Token, error) {
 	t.Helper()
-	challenge, err := f.service.Challenge(testEventID)
+	challenge, err := f.service.Challenge(testSource, testEventID)
 	if err != nil {
 		t.Fatalf("Challenge: %v", err)
 	}
