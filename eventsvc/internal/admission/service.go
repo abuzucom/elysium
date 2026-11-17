@@ -261,13 +261,15 @@ func (s *Service) Revoke(eventID, deviceID string) error {
 func (s *Service) Challenge(source netip.Addr, eventID string) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := s.cfg.Monotonic()
-	// The quota runs first, so rejected calls still cost the sender.
-	if !s.challengeLimiter.allow(source, now) {
-		return nil, ErrChallengeRateLimited
-	}
+	// The event check runs before the quota. Calls for unknown or
+	// malformed events store no state and cost no quota. Another sender
+	// on a shared address cannot spend the quota with bogus events.
 	if _, err := s.event(eventID); err != nil {
 		return nil, err
+	}
+	now := s.cfg.Monotonic()
+	if !s.challengeLimiter.allow(source, now) {
+		return nil, ErrChallengeRateLimited
 	}
 	s.sweepChallenges(now)
 	if len(s.challenges) >= MaxOutstandingChallenges || s.eventChallenges[eventID] >= MaxEventChallenges {
@@ -295,6 +297,8 @@ func (s *Service) sweepChallenges(now time.Duration) {
 }
 
 // removeChallenge deletes one challenge and releases its event slot.
+// Every removal must go through this helper. A direct delete would leave
+// eventChallenges counting a challenge that no longer exists.
 func (s *Service) removeChallenge(key string) {
 	entry, ok := s.challenges[key]
 	if !ok {

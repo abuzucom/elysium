@@ -176,7 +176,8 @@ These Gate 0 findings remain unverified.
   addresses age out. Tracked addresses keep their own limit.
 - Challenges carry a per-source quota of 10 per 60-second window, equal
   to the challenge lifetime. One address therefore holds at most 10
-  outstanding challenges. `Challenge` takes the source address.
+  outstanding challenges. `Challenge` takes the source address. Calls
+  for unknown or malformed events cost no quota.
 - One event holds at most 2048 outstanding challenges, half of the
   4096 pool. One event cannot lock out listeners of another event.
 - One event holds at most 1000 open admission requests. Requests past
