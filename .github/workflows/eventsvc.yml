@@ -1,0 +1,48 @@
+name: eventsvc
+
+on:
+  pull_request:
+    paths:
+      - "eventsvc/**"
+      - ".github/workflows/eventsvc.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "eventsvc/**"
+      - ".github/workflows/eventsvc.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  go-checks:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: eventsvc
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version-file: eventsvc/go.mod
+          cache-dependency-path: eventsvc/go.sum
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "Files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Check module tidiness
+        run: |
+          go mod tidy -diff
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+      - name: Test with race detector
+        run: go test -race ./...

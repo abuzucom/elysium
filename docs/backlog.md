@@ -164,6 +164,41 @@ These Gate 0 findings remain unverified.
 
 - Broadcaster certificate enrollment, rotation, and revocation procedure.
 
+## Event service core (experimental configuration and findings)
+
+- Challenge lifetime of 60 seconds, at most 4096 outstanding challenges,
+  and a minimum token lifetime of 60 seconds. All three live as package
+  constants in `eventsvc/internal/admission`.
+- The rate limiter sweeps idle source addresses once it tracks more than
+  1024 of them.
+- Request expiry, challenge expiry, and rate windows use a monotonic
+  clock. Admission validity and token lifetime use venue UTC.
+- Staff approval needs a usable venue UTC estimate to record the
+  approval instant. An unsynchronized venue clock refuses approval.
+- A device with an open request receives that request again instead of a
+  new code. The repeat still counts toward the rate limit.
+- The service signs listener tokens itself and stamps the JWT issue,
+  not-before, and expiry claims from venue UTC. LiveKit checks the
+  claims against the controller system clock. Every claim moves back by
+  the full `MaxClockOffset`. A system clock lagging by up to that bound
+  at any time during the token lifetime still rejects the token by the
+  venue expiry. A system clock ahead only ends the token early. A gap
+  beyond `MaxClockOffset` at issue refuses tokens.
+- Deployment requirement: the controller system clock must stay within
+  `MaxClockOffset` of venue UTC for every token lifetime. The value must
+  stay below the 60-second minimum token lifetime. The deployment value
+  and how the controller disciplines its system clock remain open.
+- Planned by human decision (2026-11-16): the event service removes a
+  participant from the LiveKit room when its admission ends or is
+  revoked. Room removal enforces the admission end even when the
+  controller clock leaves its bound. It needs the LiveKit room service
+  API in a later increment.
+- Token issuance accepts only a usable venue estimate. The gateway
+  `venuetime` service needs an adapter to the `VenueClock` interface.
+- Open in later increments: the HTTP API, invitation enrollment with
+  email codes, staff sign-in, persistent storage, retention, and
+  challenge rate limiting.
+
 ## Calendar and scheduling
 
 - Event scheduling gap and overlap rules for recurring local-time
