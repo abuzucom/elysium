@@ -85,10 +85,15 @@ type Service struct {
 
 	mu sync.Mutex
 	// limiter counts admission requests per source address.
-	limiter *rateLimiter
-	// challengeLimiter counts challenges per source address.
-	challengeLimiter *rateLimiter
-	challenges       map[string]challenge
+	limiter *rateLimiter[netip.Addr]
+	// challengeFailures counts failed challenge requests per source
+	// address.
+	challengeFailures *rateLimiter[netip.Addr]
+	// deviceChallenges counts challenges per admitted device.
+	deviceChallenges *rateLimiter[string]
+	// nonces holds recent challenge request nonces and their expiry.
+	nonces     map[nonceKey]time.Duration
+	challenges map[string]challenge
 	// eventChallenges counts outstanding challenges per event.
 	eventChallenges map[string]int
 }
@@ -99,11 +104,13 @@ func NewService(cfg Config) (*Service, error) {
 		return nil, err
 	}
 	return &Service{
-		cfg:              cfg,
-		limiter:          newRateLimiter(RequestRateLimit, RequestRateWindow, MaxTrackedAddresses),
-		challengeLimiter: newRateLimiter(ChallengeRateLimit, ChallengeRateWindow, MaxTrackedAddresses),
-		challenges:       make(map[string]challenge),
-		eventChallenges:  make(map[string]int),
+		cfg:               cfg,
+		limiter:           newRateLimiter[netip.Addr](RequestRateLimit, RequestRateWindow, MaxTrackedAddresses),
+		challengeFailures: newRateLimiter[netip.Addr](ChallengeFailureLimit, ChallengeRateWindow, MaxTrackedAddresses),
+		deviceChallenges:  newRateLimiter[string](ChallengeRateLimit, ChallengeRateWindow, MaxTrackedDevices),
+		nonces:            make(map[nonceKey]time.Duration),
+		challenges:        make(map[string]challenge),
+		eventChallenges:   make(map[string]int),
 	}, nil
 }
 
@@ -255,22 +262,99 @@ func (s *Service) Revoke(eventID, deviceID string) error {
 	return nil
 }
 
-// Challenge returns a single-use random challenge bound to one event. A
-// per-source quota and a per-event cap keep one caller from taking the
-// whole challenge pool.
-func (s *Service) Challenge(source netip.Addr, eventID string) ([]byte, error) {
+// Challenge returns a single-use random challenge bound to one event.
+// Only a device with a valid admission for the event receives one. The
+// quota binds to the signing device, so senders sharing a source address
+// cannot spend each other's quota with valid requests.
+func (s *Service) Challenge(source netip.Addr, request ChallengeRequest) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// The event check runs before the quota. Calls for unknown or
-	// malformed events store no state and cost no quota. Another sender
-	// on a shared address cannot spend the quota with bogus events.
-	if _, err := s.event(eventID); err != nil {
+	// The event check runs first. Calls for unknown or malformed events
+	// store no state and cost no budget.
+	if _, err := s.event(request.EventID); err != nil {
 		return nil, err
 	}
 	now := s.cfg.Monotonic()
-	if !s.challengeLimiter.allow(source, now) {
+	// A source past its failure budget is refused before any signature
+	// work. The budget bounds verification cost per address.
+	if s.challengeFailures.blocked(source, now) {
+		return nil, ErrChallengeFailures
+	}
+	deviceID, err := s.authorizeChallenge(request, now)
+	if err != nil {
+		s.challengeFailures.record(source, now)
+		return nil, err
+	}
+	// A device over its own quota does not charge the address. An
+	// admitted device cannot lock out its neighbors that way.
+	if !s.deviceChallenges.allow(deviceID, now) {
 		return nil, ErrChallengeRateLimited
 	}
+	s.rememberNonce(deviceID, request.Nonce, now)
+	return s.issueChallenge(request.EventID, now)
+}
+
+// authorizeChallenge verifies a signed challenge request and returns the
+// device identifier of an admitted, unrevoked device.
+func (s *Service) authorizeChallenge(request ChallengeRequest, now time.Duration) (string, error) {
+	if len(request.Nonce) != ChallengeNonceBytes {
+		return "", fmt.Errorf("%w: nonce must hold %d bytes", ErrInvalidArgument, ChallengeNonceBytes)
+	}
+	message := ChallengeRequestMessage(request.EventID, request.PublicKey, request.Nonce)
+	if err := verifyDevice(request.PublicKey, message, request.Signature); err != nil {
+		return "", err
+	}
+	deviceID := DeviceID(request.PublicKey)
+	if s.nonceSeen(deviceID, request.Nonce, now) {
+		return "", ErrChallengeReplayed
+	}
+	admission, ok := s.cfg.Store.Admission(request.EventID, deviceID)
+	if !ok || !bytes.Equal(admission.PublicKey, request.PublicKey) {
+		return "", ErrNoAdmission
+	}
+	if admission.Revoked {
+		return "", ErrRevoked
+	}
+	return deviceID, nil
+}
+
+// nonceKey identifies one challenge request nonce of one device.
+type nonceKey struct {
+	deviceID string
+	nonce    [ChallengeNonceBytes]byte
+}
+
+func newNonceKey(deviceID string, nonce []byte) nonceKey {
+	key := nonceKey{deviceID: deviceID}
+	copy(key.nonce[:], nonce)
+	return key
+}
+
+// nonceSeen reports whether the device used the nonce inside the window.
+func (s *Service) nonceSeen(deviceID string, nonce []byte, now time.Duration) bool {
+	expiresAt, ok := s.nonces[newNonceKey(deviceID, nonce)]
+	return ok && now < expiresAt
+}
+
+// rememberNonce records a nonce for ChallengeRateWindow. Nonces are only
+// recorded inside the device quota, which bounds the map.
+func (s *Service) rememberNonce(deviceID string, nonce []byte, now time.Duration) {
+	if len(s.nonces) > rateSweepThreshold {
+		expired := make([]nonceKey, 0)
+		for key, expiresAt := range s.nonces {
+			if now >= expiresAt {
+				expired = append(expired, key)
+			}
+		}
+		for _, key := range expired {
+			delete(s.nonces, key)
+		}
+	}
+	s.nonces[newNonceKey(deviceID, nonce)] = now + ChallengeRateWindow
+}
+
+// issueChallenge draws and stores a challenge within the pool caps.
+func (s *Service) issueChallenge(eventID string, now time.Duration) ([]byte, error) {
 	s.sweepChallenges(now)
 	if len(s.challenges) >= MaxOutstandingChallenges || s.eventChallenges[eventID] >= MaxEventChallenges {
 		return nil, ErrTooManyChallenges

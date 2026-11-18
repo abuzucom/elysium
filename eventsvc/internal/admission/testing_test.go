@@ -133,6 +133,26 @@ func (d testDevice) admissionRequest(t *testing.T, eventID string) SignedRequest
 	}
 }
 
+// challengeRequest signs a challenge request with a fresh random nonce.
+func (d testDevice) challengeRequest(t *testing.T, eventID string) ChallengeRequest {
+	t.Helper()
+	nonce := make([]byte, ChallengeNonceBytes)
+	if _, err := rand.Read(nonce); err != nil {
+		t.Fatalf("nonce: %v", err)
+	}
+	return d.challengeRequestWithNonce(t, eventID, nonce)
+}
+
+func (d testDevice) challengeRequestWithNonce(t *testing.T, eventID string, nonce []byte) ChallengeRequest {
+	t.Helper()
+	return ChallengeRequest{
+		EventID:   eventID,
+		PublicKey: d.der,
+		Nonce:     nonce,
+		Signature: d.sign(t, ChallengeRequestMessage(eventID, d.der, nonce)),
+	}
+}
+
 func (d testDevice) tokenRequest(t *testing.T, eventID string, challenge []byte) TokenRequest {
 	t.Helper()
 	return TokenRequest{
@@ -178,23 +198,37 @@ func newFixtureWithRandom(t *testing.T, random interface{ Read([]byte) (int, err
 // admit runs the staff approval flow for one device.
 func (f fixture) admit(t *testing.T, device testDevice) Admission {
 	t.Helper()
-	receipt, err := f.service.RequestAdmission(testSource, device.admissionRequest(t, testEventID))
+	return f.admitFrom(t, device, testSource, testEventID)
+}
+
+// admitFrom runs the staff approval flow for one device and event with
+// the request sent from source.
+func (f fixture) admitFrom(t *testing.T, device testDevice, source netip.Addr, eventID string) Admission {
+	t.Helper()
+	receipt, err := f.service.RequestAdmission(source, device.admissionRequest(t, eventID))
 	if err != nil {
-		t.Fatalf("RequestAdmission: %v", err)
+		t.Fatalf("RequestAdmission %s: %v", eventID, err)
 	}
-	admission, err := f.service.Approve(testEventID, receipt.Code, testApprover)
+	admission, err := f.service.Approve(eventID, receipt.Code, testApprover)
 	if err != nil {
-		t.Fatalf("Approve: %v", err)
+		t.Fatalf("Approve %s: %v", eventID, err)
 	}
 	return admission
 }
 
-// token runs the challenge and token flow for one admitted device.
+// challenge requests a challenge for one device and event from source.
+func (f fixture) challenge(t *testing.T, device testDevice, source netip.Addr, eventID string) ([]byte, error) {
+	t.Helper()
+	return f.service.Challenge(source, device.challengeRequest(t, eventID))
+}
+
+// token runs the challenge and token flow for one device. A refused
+// challenge returns its error.
 func (f fixture) token(t *testing.T, device testDevice) (Token, error) {
 	t.Helper()
-	challenge, err := f.service.Challenge(testSource, testEventID)
+	challenge, err := f.challenge(t, device, testSource, testEventID)
 	if err != nil {
-		t.Fatalf("Challenge: %v", err)
+		return Token{}, err
 	}
 	return f.service.IssueToken(device.tokenRequest(t, testEventID, challenge))
 }
