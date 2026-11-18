@@ -103,6 +103,11 @@ without staff approval.
 - A token grants one event room and subscription only.
 - Revoking an Admission stops refresh. The existing token expires on its
   own. Removing the participant from the room ends access at once.
+- Shortening the token lifetime after deployment requires rotating the
+  LiveKit API secret at the cutover. Tokens issued under the longer
+  lifetime keep their original expiry, and only a new secret invalidates
+  them. Amendment A2 needs no rotation, because no deployment has issued
+  tokens before it.
 
 ## Offline behavior
 
