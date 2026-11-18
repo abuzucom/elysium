@@ -261,7 +261,8 @@ These Gate 0 findings remain unverified.
 - Room service calls use a room admin token scoped to one room with a
   60-second lifetime. LiveKit checks it against the controller system
   clock. Each call times out after 10 seconds whatever the caller's
-  context allows. Removing an absent participant counts as success. Checked
+  context allows. The room service URL must use https unless LiveKit
+  runs on the controller's loopback interface. Removing an absent participant counts as success. Checked
   against LiveKit v1.13.11: an absent participant returns not found,
   and a wrong secret returns unauthenticated.
 - Token issuance accepts only a usable venue estimate. The gateway

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"time"
 
@@ -39,7 +40,7 @@ type LiveKitRooms struct {
 }
 
 // NewLiveKitRooms returns a RoomRemover for the LiveKit server at
-// serverURL, an http or https base URL. The key pair signs short room
+// serverURL, an https base URL, or an http base URL on a loopback host. The key pair signs short room
 // admin tokens and stays on the venue controller.
 func NewLiveKitRooms(serverURL, apiKey, apiSecret string, client *http.Client) (*LiveKitRooms, error) {
 	parsed, err := url.Parse(serverURL)
@@ -50,6 +51,10 @@ func NewLiveKitRooms(serverURL, apiKey, apiSecret string, client *http.Client) (
 		// A path prefix is allowed for a reverse proxy. Credentials, a
 		// query, or a fragment have no meaning in a base URL.
 		return nil, fmt.Errorf("%w: LiveKit server URL must not carry credentials, a query, or a fragment", ErrInvalidArgument)
+	case parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()):
+		// Every call carries a room admin token. Plain HTTP is allowed
+		// only to a LiveKit server on the same controller.
+		return nil, fmt.Errorf("%w: LiveKit server URL must use https unless the host is loopback", ErrInvalidArgument)
 	case apiKey == "":
 		return nil, fmt.Errorf("%w: LiveKit API key is required", ErrInvalidArgument)
 	case len(apiSecret) < MinLiveKitSecretBytes:
@@ -63,6 +68,15 @@ func NewLiveKitRooms(serverURL, apiKey, apiSecret string, client *http.Client) (
 		apiSecret: apiSecret,
 		timeout:   roomServiceTimeout,
 	}, nil
+}
+
+// isLoopbackHost reports whether host names this machine.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.IsLoopback()
 }
 
 // RemoveParticipant removes identity from room. The call carries a room

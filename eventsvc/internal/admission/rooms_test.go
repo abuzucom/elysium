@@ -558,3 +558,25 @@ func TestExpireAdmissionsResumesAfterPreviousSweep(t *testing.T) {
 		t.Fatalf("second sweep starts with %v, want the admission the first sweep never reached", second[:min(1, len(second))])
 	}
 }
+
+func TestNewLiveKitRoomsRequiresTLSOffLoopback(t *testing.T) {
+	for _, serverURL := range []string{
+		"http://10.20.0.1:7880",
+		"http://livekit.venue.example",
+		"http://[fd00::1]:7880",
+	} {
+		if _, err := NewLiveKitRooms(serverURL, testAPIKey, testAPISecret, http.DefaultClient); !errors.Is(err, ErrInvalidArgument) {
+			t.Fatalf("NewLiveKitRooms(%q) error = %v, want ErrInvalidArgument", serverURL, err)
+		}
+	}
+	for _, serverURL := range []string{
+		"http://127.0.0.1:7880",
+		"http://[::1]:7880",
+		"http://localhost:7880",
+		"https://livekit.venue.example",
+	} {
+		if _, err := NewLiveKitRooms(serverURL, testAPIKey, testAPISecret, http.DefaultClient); err != nil {
+			t.Fatalf("NewLiveKitRooms(%q): %v", serverURL, err)
+		}
+	}
+}
