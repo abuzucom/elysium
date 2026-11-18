@@ -159,6 +159,10 @@ type Admission struct {
 	// RoomRemoved records that the service removed the device from the
 	// event room after the admission ended.
 	RoomRemoved bool
+	// RemovalDue records that the expiry sweep tried to remove the device
+	// and failed. The removal stays due even if the venue clock later
+	// steps back, and approval of the device waits until it succeeds.
+	RemovalDue bool
 }
 
 // SignedRequest is an admission request signed with the device key.

@@ -259,8 +259,12 @@ These Gate 0 findings remain unverified.
   so approval of a device waits with `ErrRemovalPending` while a
   removal call for it runs, from `Revoke` or the sweep. The request
   stays open, and staff approve it once the call ends.
-- A sweep also removes revoked devices whose room removal has not
-  succeeded. It first handles a retry list of at most 128 devices, then
+- A failed expiry removal is recorded on the admission (`RemovalDue`).
+  Like a failed revocation removal, it holds approval of the device
+  back with `ErrRemovalPending` until a removal succeeds, even if the
+  venue clock steps back before the admission end.
+- A sweep also removes revoked devices, and devices with a due removal,
+  whose room removal has not succeeded. It first handles a retry list of at most 128 devices, then
   continues from its cursor. A device stays on the retry list until its
   current admission is removed from the room, also when staff approve
   it again in between. A valid replacement keeps its place on the list

@@ -748,7 +748,12 @@ func TestExpireAdmissionsKeepsRetryForReplacement(t *testing.T) {
 		t.Fatalf("first sweep: error = %v, want the room service error", err)
 	}
 	f.rooms.setFailing(failing, false)
-	// The venue clock steps back and staff approve the failed device again.
+	// Staff revoke the failed admission, which removes the device. The
+	// venue clock then steps back and staff approve the device again
+	// while it is still on the retry list.
+	if err := f.service.Revoke(context.Background(), testEventID, failing, sorted[0].ID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
 	f.clock.set(synchronizedAt(end.Add(-time.Hour)))
 	f.admitFrom(t, devices[failing], sources.next(), testEventID)
 	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); err != nil {
@@ -811,4 +816,33 @@ func TestExpireAdmissionsHoldsCursorForRetryOverflow(t *testing.T) {
 		}
 	}
 	t.Fatalf("second sweep skipped %s, the first failure the retry list could not hold", firstDropped)
+}
+
+func TestApproveWaitsForFailedExpiryRemoval(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	admission := f.admit(t, device)
+	f.clock.set(synchronizedAt(admission.ValidUntil))
+	f.rooms.setErr(errRoomService)
+	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); !errors.Is(err, errRoomService) {
+		t.Fatalf("first sweep: error = %v, want the room service error", err)
+	}
+	// The venue clock steps back before the event end, so the admission
+	// looks valid again. Staff try to approve the device again.
+	f.clock.set(synchronizedAt(admission.ValidUntil.Add(-time.Hour)))
+	receipt, _, err := f.requestAndApprove(t, device, testSource)
+	if !errors.Is(err, ErrRemovalPending) {
+		t.Fatalf("approval after a failed expiry removal: error = %v, want ErrRemovalPending", err)
+	}
+	f.rooms.setErr(nil)
+	f.rooms.take()
+	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	if calls := f.rooms.take(); len(calls) != 1 || calls[0].identity != admission.DeviceID {
+		t.Fatalf("second sweep removals = %v, want the device whose removal failed", calls)
+	}
+	if _, err := f.service.Approve(testEventID, receipt.Code, testApprover); err != nil {
+		t.Fatalf("approval after the retried removal: %v", err)
+	}
 }

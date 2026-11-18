@@ -259,12 +259,13 @@ func (s *Service) Approve(eventID, code, approverID string) (Admission, error) {
 		return Admission{}, ErrRequestNotFound
 	}
 	// The request stays open, so staff can approve once removal ends. A
-	// revoked admission whose room removal has not succeeded also holds
-	// approval back. The sweep retries that removal.
+	// revoked admission, or one whose expiry removal failed, holds approval
+	// back until its room removal succeeds. The sweep retries that
+	// removal.
 	if s.pendingRemovals[deviceKey{eventID, request.DeviceID}] > 0 {
 		return Admission{}, ErrRemovalPending
 	}
-	if current, ok := s.cfg.Store.Admission(eventID, request.DeviceID); ok && current.Revoked && !current.RoomRemoved {
+	if current, ok := s.cfg.Store.Admission(eventID, request.DeviceID); ok && removalOwed(current) {
 		return Admission{}, ErrRemovalPending
 	}
 	venue := s.cfg.Clock.Now()
@@ -558,6 +559,7 @@ func (s *Service) ExpireAdmissions(ctx context.Context, eventID string) (int, er
 			continue
 		}
 		result.failedAt[i] = true
+		s.markRemovalDue(item.admission)
 		if firstFailure == nil {
 			firstFailure = fmt.Errorf("remove device %s: %w", item.admission.DeviceID, err)
 		}
@@ -610,10 +612,14 @@ type sweepResult struct {
 // and no removal succeeded yet. The end test matches the approval check,
 // so a device leaves the room no later than token issuance stops.
 func needsRemoval(admission Admission, venue VenueTime) bool {
-	if admission.RoomRemoved {
-		return false
-	}
-	return admission.Revoked || !venue.latest().Before(admission.ValidUntil)
+	return removalOwed(admission) || (!admission.RoomRemoved && !venue.latest().Before(admission.ValidUntil))
+}
+
+// removalOwed reports whether a removal is owed regardless of the venue
+// clock: the admission was revoked, or an expiry removal failed, and no
+// removal succeeded since.
+func removalOwed(admission Admission) bool {
+	return !admission.RoomRemoved && (admission.Revoked || admission.RemovalDue)
 }
 
 // planSweep selects the admissions of one sweep. Retry devices come
@@ -732,6 +738,19 @@ func (s *Service) finishSweep(eventID string, plan sweepPlan, result sweepResult
 	if plan.lastRead != "" {
 		s.sweepCursors[eventID] = cursor
 	}
+}
+
+// markRemovalDue records a failed removal on the admission, matched by
+// ID, so the removal stays due and approval waits for it.
+func (s *Service) markRemovalDue(failed Admission) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.cfg.Store.Admission(failed.EventID, failed.DeviceID)
+	if !ok || current.ID != failed.ID || current.RoomRemoved {
+		return
+	}
+	current.RemovalDue = true
+	s.cfg.Store.PutAdmission(current)
 }
 
 // addRetryRemoval puts a device on the event's retry list when it has
