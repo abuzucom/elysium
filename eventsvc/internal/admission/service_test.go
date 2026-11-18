@@ -416,8 +416,8 @@ func TestChallengeIsBoundToEvent(t *testing.T) {
 func TestIssueTokenRefusesRevokedAdmission(t *testing.T) {
 	f := newFixture(t)
 	device := newTestDevice(t)
-	f.admit(t, device)
-	if err := f.service.Revoke(context.Background(), testEventID, DeviceID(device.der)); err != nil {
+	admission := f.admit(t, device)
+	if err := f.service.Revoke(context.Background(), testEventID, admission.DeviceID, admission.ID); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 	if _, err := f.token(t, device); !errors.Is(err, ErrRevoked) {
@@ -512,7 +512,7 @@ func TestOutstandingChallengesAreBounded(t *testing.T) {
 
 func TestRevokeRequiresAdmission(t *testing.T) {
 	f := newFixture(t)
-	if err := f.service.Revoke(context.Background(), testEventID, "missing"); !errors.Is(err, ErrNoAdmission) {
+	if err := f.service.Revoke(context.Background(), testEventID, "missing", ""); !errors.Is(err, ErrNoAdmission) {
 		t.Fatalf("error = %v, want ErrNoAdmission", err)
 	}
 }

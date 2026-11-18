@@ -241,9 +241,13 @@ These Gate 0 findings remain unverified.
   participant from the LiveKit room when its admission ends or is
   revoked. Room removal enforces the admission end even when the
   controller clock leaves its bound.
-- `Revoke` removes the device from the event room through the LiveKit
-  room service API. The admission stays revoked when removal fails, and
-  a repeated `Revoke` retries it. `ExpireAdmissions` removes devices
+- `Revoke` takes the admission ID and refuses with `ErrAdmissionChanged`
+  when the device holds a different admission, so a stale decision
+  cannot revoke a replacement. It removes the device from the event room
+  through the LiveKit room service API and records the removal on the
+  admission. The admission stays revoked when removal fails, and a
+  repeated `Revoke` retries it. A repeated `Revoke` after a successful
+  removal makes no room call. `ExpireAdmissions` removes devices
   whose admission ended by the latest possible venue time and records
   the removal on the admission. A failed removal is retried on the next
   call. A replacement admission approved during the call stays
@@ -253,6 +257,9 @@ These Gate 0 findings remain unverified.
   so approval of a device waits with `ErrRemovalPending` while a
   removal call for it runs, from `Revoke` or the sweep. The request
   stays open, and staff approve it once the call ends.
+- A sweep first retries devices whose removal failed or was not reached
+  in the previous sweep, at most 128 of them. The rest of the sweep
+  continues from its cursor.
 - One sweep reads one page of at most 256 admissions through
   `Store.AdmissionsAfter`, so its memory and work stay bounded however
   large the event grows. Each sweep starts after the previous page and

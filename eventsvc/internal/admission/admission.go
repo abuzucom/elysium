@@ -87,6 +87,7 @@ var (
 	ErrTooManyChallenges    = errors.New("too many outstanding challenges")
 	ErrClockOffset          = errors.New("controller system clock is too far from venue UTC")
 	ErrRemovalPending       = errors.New("room removal for this device is still in progress")
+	ErrAdmissionChanged     = errors.New("admission was replaced since it was selected")
 )
 
 // identifierPattern limits event and approver identifiers to characters

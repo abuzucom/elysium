@@ -270,3 +270,8 @@ func mustDecodeToken(t *testing.T, raw string, at time.Time) *listenerClaims {
 func isExpired(err error) bool {
 	return errors.Is(err, jwt.ErrTokenExpired)
 }
+
+// id returns the device identifier.
+func (d testDevice) id() string {
+	return DeviceID(d.der)
+}
