@@ -86,6 +86,8 @@ var (
 	ErrChallengeInvalid     = errors.New("challenge is unknown, used, or expired")
 	ErrTooManyChallenges    = errors.New("too many outstanding challenges")
 	ErrClockOffset          = errors.New("controller system clock is too far from venue UTC")
+	ErrRemovalPending       = errors.New("room removal for this device is still in progress")
+	ErrAdmissionChanged     = errors.New("admission was replaced since it was selected")
 )
 
 // identifierPattern limits event and approver identifiers to characters
@@ -142,6 +144,9 @@ type Request struct {
 
 // Admission binds one device to one event.
 type Admission struct {
+	// ID identifies this admission among replacements for the same
+	// device and event.
+	ID         string
 	EventID    string
 	DeviceID   string
 	PublicKey  []byte
@@ -151,6 +156,13 @@ type Admission struct {
 	ApprovedAt time.Time
 	ValidUntil time.Time
 	Revoked    bool
+	// RoomRemoved records that the service removed the device from the
+	// event room after the admission ended.
+	RoomRemoved bool
+	// RemovalDue records that the expiry sweep tried to remove the device
+	// and failed. The removal stays due even if the venue clock later
+	// steps back, and approval of the device waits until it succeeds.
+	RemovalDue bool
 }
 
 // SignedRequest is an admission request signed with the device key.

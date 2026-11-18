@@ -2,13 +2,17 @@ package admission
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
 	"net/netip"
+	"reflect"
 	"regexp"
+	"slices"
 	"sync"
 	"time"
 
@@ -23,6 +27,8 @@ const (
 	maxCodeAttempts = 32
 	// challengeBytes is the random challenge length.
 	challengeBytes = 32
+	// admissionIDBytes is the random admission identifier length.
+	admissionIDBytes = 16
 )
 
 var codePattern = regexp.MustCompile(`^[0-9]{6}$`)
@@ -49,6 +55,25 @@ type Config struct {
 	// stays on the venue controller.
 	LiveKitAPIKey    string
 	LiveKitAPISecret string
+	// Rooms removes participants from LiveKit rooms on revocation and
+	// at admission end. Production code passes a LiveKitRooms.
+	Rooms RoomRemover
+}
+
+// isNilRemover reports a nil remover, including a nil value of any
+// nil-able kind wrapped in the interface. A wrapped nil would pass a
+// plain nil check and panic on the first removal.
+func isNilRemover(rooms RoomRemover) bool {
+	if rooms == nil {
+		return true
+	}
+	value := reflect.ValueOf(rooms)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func (cfg Config) validate() error {
@@ -65,6 +90,8 @@ func (cfg Config) validate() error {
 		return fmt.Errorf("%w: random source is required", ErrInvalidArgument)
 	case cfg.Store == nil:
 		return fmt.Errorf("%w: store is required", ErrInvalidArgument)
+	case isNilRemover(cfg.Rooms):
+		return fmt.Errorf("%w: room remover is required", ErrInvalidArgument)
 	case cfg.LiveKitAPIKey == "":
 		return fmt.Errorf("%w: LiveKit API key is required", ErrInvalidArgument)
 	case len(cfg.LiveKitAPISecret) < MinLiveKitSecretBytes:
@@ -92,8 +119,27 @@ type Service struct {
 	// deviceChallenges counts challenges per admitted device.
 	deviceChallenges *rateLimiter[string]
 	// nonces holds recent challenge request nonces and their expiry.
-	nonces     map[nonceKey]time.Duration
-	challenges map[string]challenge
+	nonces map[nonceKey]time.Duration
+	// pendingRemovals counts room removal calls in flight per device.
+	// Approval waits until the count drops to zero, because LiveKit
+	// removes by identity and would end a replacement's session.
+	pendingRemovals map[deviceKey]int
+	// sweepCursors holds the last device ID each event's expiry sweep
+	// attempted. The next sweep starts after it.
+	sweepCursors map[string]string
+	// retryRemovals lists, per event, devices whose last removal failed or
+	// was not reached. The next sweep tries them before its page.
+	retryRemovals map[string][]string
+	// sweepHolds holds, per event, the device the cursor last held back for
+	// because the retry list was full. The cursor holds back for a device
+	// once. If it overflows again, the sweep moves on, so failures that
+	// persist cannot block later admissions.
+	sweepHolds map[string]string
+	// removalFinished, when set, runs after the sweep finishes one room
+	// removal and before it moves on. Only tests set it, to act in the
+	// window right after a removal call.
+	removalFinished func()
+	challenges      map[string]challenge
 	// eventChallenges counts outstanding challenges per event.
 	eventChallenges map[string]int
 }
@@ -109,6 +155,10 @@ func NewService(cfg Config) (*Service, error) {
 		challengeFailures: newRateLimiter[netip.Addr](ChallengeFailureLimit, ChallengeRateWindow, MaxTrackedAddresses),
 		deviceChallenges:  newRateLimiter[string](ChallengeRateLimit, ChallengeRateWindow, MaxTrackedDevices),
 		nonces:            make(map[nonceKey]time.Duration),
+		pendingRemovals:   make(map[deviceKey]int),
+		sweepCursors:      make(map[string]string),
+		retryRemovals:     make(map[string][]string),
+		sweepHolds:        make(map[string]string),
 		challenges:        make(map[string]challenge),
 		eventChallenges:   make(map[string]int),
 	}, nil
@@ -217,6 +267,16 @@ func (s *Service) Approve(eventID, code, approverID string) (Admission, error) {
 	if !found {
 		return Admission{}, ErrRequestNotFound
 	}
+	// The request stays open, so staff can approve once removal ends. A
+	// revoked admission, or one whose expiry removal failed, holds approval
+	// back until its room removal succeeds. The sweep retries that
+	// removal.
+	if s.pendingRemovals[deviceKey{eventID, request.DeviceID}] > 0 {
+		return Admission{}, ErrRemovalPending
+	}
+	if current, ok := s.cfg.Store.Admission(eventID, request.DeviceID); ok && removalOwed(current) {
+		return Admission{}, ErrRemovalPending
+	}
 	venue := s.cfg.Clock.Now()
 	if !venue.usable() {
 		return Admission{}, ErrVenueTimeUnavailable
@@ -225,7 +285,12 @@ func (s *Service) Approve(eventID, code, approverID string) (Admission, error) {
 	if !venue.latest().Before(validUntil) {
 		return Admission{}, ErrAdmissionExpired
 	}
+	id, err := s.newAdmissionID()
+	if err != nil {
+		return Admission{}, err
+	}
 	admission := Admission{
+		ID:         id,
 		EventID:    eventID,
 		DeviceID:   request.DeviceID,
 		PublicKey:  request.PublicKey,
@@ -248,18 +313,65 @@ func findByCode(requests []Request, code string) (Request, bool) {
 	return Request{}, false
 }
 
-// Revoke marks an admission revoked. Refresh stops. A token already issued
-// expires on its own unless the participant is removed from the room.
-func (s *Service) Revoke(eventID, deviceID string) error {
+// Revoke marks an admission revoked and removes the device from the event
+// room. Refresh stops at once. The admission stays revoked when removal
+// fails. A repeated Revoke retries the removal.
+func (s *Service) Revoke(ctx context.Context, eventID, deviceID, admissionID string) error {
+	admission, alreadyRemoved, err := s.markRevoked(eventID, deviceID, admissionID)
+	if err != nil {
+		return err
+	}
+	if alreadyRemoved {
+		return nil
+	}
+	defer s.endRemoval(eventID, deviceID)
+	// The room service call runs outside the lock. A slow LiveKit server
+	// must not stall admission and token issuance.
+	if err := s.cfg.Rooms.RemoveParticipant(ctx, eventID, deviceID); err != nil {
+		// The sweep retries the removal. Approval of the device waits
+		// until it succeeds.
+		s.addRetryRemoval(eventID, deviceID)
+		return fmt.Errorf("admission revoked, room removal failed: %w", err)
+	}
+	s.markRoomRemoved(admission)
+	return nil
+}
+
+// markRevoked revokes the admission and starts a pending removal in one
+// locked step, so no approval can slip in before the room call. It
+// refuses an admission ID that is no longer current, so a stale decision
+// cannot revoke a replacement. It reports whether the device already left
+// the room, in which case no removal starts.
+func (s *Service) markRevoked(eventID, deviceID, admissionID string) (Admission, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	admission, ok := s.cfg.Store.Admission(eventID, deviceID)
 	if !ok {
-		return ErrNoAdmission
+		return Admission{}, false, ErrNoAdmission
+	}
+	if admission.ID != admissionID {
+		return Admission{}, false, ErrAdmissionChanged
 	}
 	admission.Revoked = true
 	s.cfg.Store.PutAdmission(admission)
-	return nil
+	if admission.RoomRemoved {
+		return admission, true, nil
+	}
+	s.pendingRemovals[deviceKey{eventID, deviceID}]++
+	return admission, false, nil
+}
+
+// endRemoval ends one pending removal for the device.
+func (s *Service) endRemoval(eventID, deviceID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := deviceKey{eventID, deviceID}
+	remaining := s.pendingRemovals[key] - 1
+	if remaining <= 0 {
+		delete(s.pendingRemovals, key)
+		return
+	}
+	s.pendingRemovals[key] = remaining
 }
 
 // Challenge returns a single-use random challenge bound to one event.
@@ -410,6 +522,310 @@ func (s *Service) removeChallenge(key string) {
 
 // consumeChallenge removes a challenge and reports whether it was valid
 // for the event. Any lookup consumes the challenge.
+// maxRemovalsPerSweep bounds the room service calls of one
+// ExpireAdmissions call. The value is experimental (docs/backlog.md).
+const maxRemovalsPerSweep = 256
+
+// maxRetriesPerSweep bounds the retries of earlier failures in one
+// sweep. The rest of the sweep continues from the cursor, so failures
+// that persist cannot keep later admissions from removal.
+const maxRetriesPerSweep = maxRemovalsPerSweep / 2
+
+// ExpireAdmissions removes devices from the event room whose admission
+// ended, or was revoked without a successful room removal. It returns the
+// number of devices removed. The server loop calls it periodically for
+// each event.
+//
+// A sweep first handles the event's retry list, then reads one page from
+// its cursor. A device stays on the retry list until its current
+// admission is removed from the room, even across a replacement. One call
+// makes at most maxRemovalsPerSweep room calls. A timeout or a cancelled
+// context ends the sweep at once, because the room service is then likely
+// unreachable. Other failures skip only that device.
+func (s *Service) ExpireAdmissions(ctx context.Context, eventID string) (int, error) {
+	plan, err := s.planSweep(eventID)
+	if err != nil {
+		return 0, err
+	}
+	result := sweepResult{failedAt: make(map[int]bool), skippedAt: make(map[int]bool)}
+	var firstFailure error
+	// Room service calls run outside the lock, like Revoke.
+	for i, item := range plan.items {
+		// Staff may have approved the device again since the sweep
+		// selected it. Skip it then, so the call cannot end the
+		// replacement's session. Approval waits while the call runs.
+		if !s.beginRemoval(item.admission) {
+			result.skippedAt[i] = true
+			result.reached = i + 1
+			continue
+		}
+		result.attempted++
+		err := s.cfg.Rooms.RemoveParticipant(ctx, eventID, item.admission.DeviceID)
+		s.finishRemoval(item.admission, err)
+		if s.removalFinished != nil {
+			s.removalFinished()
+		}
+		result.reached = i + 1
+		if err == nil {
+			result.removed++
+			continue
+		}
+		result.failedAt[i] = true
+		if firstFailure == nil {
+			firstFailure = fmt.Errorf("remove device %s: %w", item.admission.DeviceID, err)
+		}
+		if errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+			break
+		}
+	}
+	s.finishSweep(eventID, plan, result)
+	if firstFailure != nil {
+		// The error keeps one sample and a count, so its size does not
+		// grow with the number of admissions.
+		return result.removed, fmt.Errorf("%d of %d room removals failed, first: %w", len(result.failedAt), result.attempted, firstFailure)
+	}
+	return result.removed, nil
+}
+
+// sweepItem is one admission a sweep tries to remove.
+type sweepItem struct {
+	admission Admission
+	// fromPage marks an item read from the page rather than the retry
+	// list. prev is the device ID read just before it, which the cursor
+	// takes when the sweep must read this item again.
+	fromPage bool
+	prev     string
+}
+
+// sweepPlan is what one sweep reads under the lock.
+type sweepPlan struct {
+	items []sweepItem
+	// waiting lists retry devices whose current admission is still valid.
+	// They stay on the retry list until that admission needs removal.
+	waiting []string
+	// lastRead is the last device ID of the page, or empty when the sweep
+	// read no page.
+	lastRead string
+}
+
+// sweepResult is what one sweep did with its plan.
+type sweepResult struct {
+	removed   int
+	attempted int
+	// reached counts the plan items the sweep got to. Items after it were
+	// not tried because the sweep stopped.
+	reached  int
+	failedAt map[int]bool
+	// skippedAt marks items whose admission changed before the call.
+	skippedAt map[int]bool
+}
+
+// needsRemoval reports whether the device must leave the room: its
+// admission ended by the latest possible venue time, or it was revoked,
+// and no removal succeeded yet. The end test matches the approval check,
+// so a device leaves the room no later than token issuance stops.
+func needsRemoval(admission Admission, venue VenueTime) bool {
+	return removalOwed(admission) || (!admission.RoomRemoved && !venue.latest().Before(admission.ValidUntil))
+}
+
+// removalOwed reports whether a removal is owed regardless of the venue
+// clock: the admission was revoked, or an expiry removal failed, and no
+// removal succeeded since.
+func removalOwed(admission Admission) bool {
+	return !admission.RoomRemoved && (admission.Revoked || admission.RemovalDue)
+}
+
+// planSweep selects the admissions of one sweep. Retry devices come
+// first, at most maxRetriesPerSweep, resolved against their current
+// admission. One page of the store after the cursor fills the rest and
+// wraps around once. The page bounds the work of one sweep however large
+// the event grows.
+func (s *Service) planSweep(eventID string) (sweepPlan, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.event(eventID); err != nil {
+		return sweepPlan{}, err
+	}
+	venue := s.cfg.Clock.Now()
+	if !venue.usable() {
+		return sweepPlan{}, ErrVenueTimeUnavailable
+	}
+	plan := sweepPlan{}
+	selected := make(map[string]bool)
+	for _, deviceID := range s.retryRemovals[eventID] {
+		admission, ok := s.cfg.Store.Admission(eventID, deviceID)
+		if !ok || admission.RoomRemoved {
+			continue
+		}
+		if !needsRemoval(admission, venue) {
+			plan.waiting = append(plan.waiting, deviceID)
+			continue
+		}
+		plan.items = append(plan.items, sweepItem{admission: admission})
+		selected[deviceID] = true
+	}
+	pageLimit := maxRemovalsPerSweep - len(plan.items)
+	cursor := s.sweepCursors[eventID]
+	page := s.cfg.Store.AdmissionsAfter(eventID, cursor, pageLimit)
+	if remaining := pageLimit - len(page); remaining > 0 && cursor != "" {
+		for _, admission := range s.cfg.Store.AdmissionsAfter(eventID, "", remaining) {
+			if admission.DeviceID > cursor {
+				break
+			}
+			page = append(page, admission)
+		}
+	}
+	prev := cursor
+	for _, admission := range page {
+		if !selected[admission.DeviceID] && needsRemoval(admission, venue) {
+			plan.items = append(plan.items, sweepItem{admission: admission, fromPage: true, prev: prev})
+		}
+		prev = admission.DeviceID
+		plan.lastRead = admission.DeviceID
+	}
+	return plan, nil
+}
+
+// finishSweep stores the next retry list and cursor. Retry devices that
+// still need removal stay first. Page devices that failed join them up to
+// maxRetriesPerSweep. The cursor never moves past a page device the sweep
+// did not reach. It also holds back for the first failed page device the
+// retry list cannot keep, once. When that device overflows again on the
+// next sweep, the cursor moves past the page instead.
+func (s *Service) finishSweep(eventID string, plan sweepPlan, result sweepResult) {
+	s.mu.Lock()
+	held := s.sweepHolds[eventID]
+	s.mu.Unlock()
+	nextHold := ""
+	advance := false
+	retry := slices.Clone(plan.waiting)
+	for i, item := range plan.items {
+		if item.fromPage {
+			continue
+		}
+		// A retry device stays on the list until its current admission is
+		// removed: when the sweep did not reach it, when its call failed,
+		// and when staff approved it again before the call. The next sweep
+		// resolves the device to its current admission.
+		if i >= result.reached || result.failedAt[i] || result.skippedAt[i] {
+			retry = append(retry, item.admission.DeviceID)
+		}
+	}
+	cursor := plan.lastRead
+	for i, item := range plan.items {
+		if !item.fromPage {
+			continue
+		}
+		if i >= result.reached {
+			cursor = item.prev
+			break
+		}
+		if !result.failedAt[i] {
+			continue
+		}
+		if len(retry) < maxRetriesPerSweep {
+			retry = append(retry, item.admission.DeviceID)
+			continue
+		}
+		if advance {
+			continue
+		}
+		if item.admission.DeviceID == held {
+			advance = true
+			continue
+		}
+		nextHold = item.admission.DeviceID
+		cursor = item.prev
+		break
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if nextHold == "" {
+		delete(s.sweepHolds, eventID)
+	} else {
+		s.sweepHolds[eventID] = nextHold
+	}
+	if len(retry) == 0 {
+		delete(s.retryRemovals, eventID)
+	} else {
+		s.retryRemovals[eventID] = retry[:min(len(retry), maxRetriesPerSweep)]
+	}
+	if plan.lastRead != "" {
+		s.sweepCursors[eventID] = cursor
+	}
+}
+
+// finishRemoval ends a sweep's pending removal and records its outcome
+// on the admission, matched by ID, in one locked step. A failure becomes
+// RemovalDue before the pending count drops, so no approval can slip in
+// between the failed call and the record that holds approval back.
+func (s *Service) finishRemoval(admission Admission, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := deviceKey{admission.EventID, admission.DeviceID}
+	if current, ok := s.cfg.Store.Admission(admission.EventID, admission.DeviceID); ok && current.ID == admission.ID {
+		if err == nil {
+			current.RoomRemoved = true
+		} else if !current.RoomRemoved {
+			current.RemovalDue = true
+		}
+		s.cfg.Store.PutAdmission(current)
+	}
+	remaining := s.pendingRemovals[key] - 1
+	if remaining <= 0 {
+		delete(s.pendingRemovals, key)
+		return
+	}
+	s.pendingRemovals[key] = remaining
+}
+
+// addRetryRemoval puts a device on the event's retry list when it has
+// room. A device left out still needs removal, so a later page finds it.
+func (s *Service) addRetryRemoval(eventID, deviceID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	retry := s.retryRemovals[eventID]
+	if slices.Contains(retry, deviceID) || len(retry) >= maxRetriesPerSweep {
+		return
+	}
+	s.retryRemovals[eventID] = append(retry, deviceID)
+}
+
+func (s *Service) setSweepCursor(eventID, deviceID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepCursors[eventID] = deviceID
+}
+
+// beginRemoval starts a pending removal when the stored admission for
+// the device is still the given one. The check and the start share one
+// locked step, so no approval can slip in between.
+func (s *Service) beginRemoval(admission Admission) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.cfg.Store.Admission(admission.EventID, admission.DeviceID)
+	if !ok || current.ID != admission.ID {
+		return false
+	}
+	s.pendingRemovals[deviceKey{admission.EventID, admission.DeviceID}]++
+	return true
+}
+
+// markRoomRemoved records the removal on the ended admission. Staff may
+// approve the device again while the room service call is in flight. The
+// admission ID tells the two apart even when the venue clock repeats an
+// instant, so a replacement stays unmarked and a later sweep handles it.
+func (s *Service) markRoomRemoved(ended Admission) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.cfg.Store.Admission(ended.EventID, ended.DeviceID)
+	if !ok || current.ID != ended.ID {
+		return
+	}
+	current.RoomRemoved = true
+	s.cfg.Store.PutAdmission(current)
+}
+
 func (s *Service) consumeChallenge(eventID string, value []byte) bool {
 	// Generated challenges are exactly challengeBytes long. Rejecting any
 	// other length first bounds work on untrusted input.
@@ -571,6 +987,16 @@ func (s *Service) openRequests(eventID string, now time.Duration) []Request {
 		open = append(open, request)
 	}
 	return open
+}
+
+// newAdmissionID draws a random admission identifier. The caller holds
+// the lock.
+func (s *Service) newAdmissionID() (string, error) {
+	value := make([]byte, admissionIDBytes)
+	if _, err := io.ReadFull(s.cfg.Random, value); err != nil {
+		return "", fmt.Errorf("read admission ID randomness: %w", err)
+	}
+	return hex.EncodeToString(value), nil
 }
 
 // uniqueCode draws a six-digit code that no open request uses.

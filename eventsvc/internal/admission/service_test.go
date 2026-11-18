@@ -1,6 +1,7 @@
 package admission
 
 import (
+	"context"
 	"errors"
 	"net/netip"
 	"regexp"
@@ -23,6 +24,7 @@ func TestNewServiceRejectsMissingConfiguration(t *testing.T) {
 		Store:            NewMemoryStore(),
 		LiveKitAPIKey:    testAPIKey,
 		LiveKitAPISecret: testAPISecret,
+		Rooms:            &recordingRooms{},
 	}
 	cases := map[string]func(*Config){
 		"clock":     func(c *Config) { c.Clock = nil },
@@ -33,6 +35,7 @@ func TestNewServiceRejectsMissingConfiguration(t *testing.T) {
 		"store":     func(c *Config) { c.Store = nil },
 		"api key":   func(c *Config) { c.LiveKitAPIKey = "" },
 		"secret":    func(c *Config) { c.LiveKitAPISecret = "" },
+		"rooms":     func(c *Config) { c.Rooms = nil },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -413,8 +416,8 @@ func TestChallengeIsBoundToEvent(t *testing.T) {
 func TestIssueTokenRefusesRevokedAdmission(t *testing.T) {
 	f := newFixture(t)
 	device := newTestDevice(t)
-	f.admit(t, device)
-	if err := f.service.Revoke(testEventID, DeviceID(device.der)); err != nil {
+	admission := f.admit(t, device)
+	if err := f.service.Revoke(context.Background(), testEventID, admission.DeviceID, admission.ID); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 	if _, err := f.token(t, device); !errors.Is(err, ErrRevoked) {
@@ -509,7 +512,7 @@ func TestOutstandingChallengesAreBounded(t *testing.T) {
 
 func TestRevokeRequiresAdmission(t *testing.T) {
 	f := newFixture(t)
-	if err := f.service.Revoke(testEventID, "missing"); !errors.Is(err, ErrNoAdmission) {
+	if err := f.service.Revoke(context.Background(), testEventID, "missing", ""); !errors.Is(err, ErrNoAdmission) {
 		t.Fatalf("error = %v, want ErrNoAdmission", err)
 	}
 }
@@ -622,6 +625,7 @@ func TestNewServiceRejectsOffsetAtOrAboveMinimumLifetime(t *testing.T) {
 		Store:            NewMemoryStore(),
 		LiveKitAPIKey:    testAPIKey,
 		LiveKitAPISecret: testAPISecret,
+		Rooms:            &recordingRooms{},
 	})
 	if !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("NewService error = %v, want ErrInvalidArgument", err)
