@@ -2,7 +2,10 @@
 
 Status: Approved v0 by the active human on 2026-11-14 with the resolved
 decisions below. Any change to these invitation and authorization
-contracts requires new approval (bootstrap section 5).
+contracts requires new approval (bootstrap section 5). Amendment A1
+(2026-11-18) changes the challenge request in flow 3 and the abuse
+limits. It takes effect when the active human approves its pull
+request.
 
 ## Purpose
 
@@ -78,7 +81,10 @@ without staff approval.
 
 ### 3. Listening session
 
-1. The app requests a challenge from the event service.
+1. The app requests a challenge from the event service. The request
+   carries the event, the device public key, and a fresh random nonce,
+   signed with the device key (amendment A1). Only a device with a
+   valid, unrevoked Admission for the event receives a challenge.
 2. The app signs the challenge with the device key.
 3. The event service verifies the signature, finds a valid Admission for
    the event, and reads venue UTC from VenueTimeService.
@@ -110,6 +116,15 @@ without staff approval.
 ## Abuse limits
 
 - Each source address may send at most 10 admission requests per minute.
+- Challenge quotas bind to the admitted device, not to the source
+  address. Devices sharing an address cannot spend each other's quota
+  with valid requests (amendment A1).
+- A small per-address budget counts only failed challenge requests. It
+  bounds signature verification work per address. A sender flooding
+  invalid requests can still exhaust the budget of a shared address.
+  Per-client addressing and client isolation on VLAN 10 remove that
+  residual risk.
+- A challenge request nonce is single use within the quota window.
 - Open requests expire after 60 minutes.
 - A device holds at most one open request per event.
 - The listener network (VLAN 10) reaches only the event API, time

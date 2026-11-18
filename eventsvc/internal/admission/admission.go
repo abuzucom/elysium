@@ -39,11 +39,20 @@ const (
 	MaxOutstandingChallenges = 4096
 	// MinTokenLifetime is the shortest token the service issues.
 	MinTokenLifetime = time.Minute
-	// ChallengeRateLimit caps challenges per source address within
+	// ChallengeRateLimit caps challenges per admitted device within
 	// ChallengeRateWindow. The window matches ChallengeLifetime, so one
-	// address holds at most ChallengeRateLimit outstanding challenges.
+	// device holds at most ChallengeRateLimit outstanding challenges.
 	ChallengeRateLimit  = 10
 	ChallengeRateWindow = ChallengeLifetime
+	// ChallengeFailureLimit caps failed challenge requests per source
+	// address within ChallengeRateWindow. Valid requests from admitted
+	// devices never count against it.
+	ChallengeFailureLimit = 10
+	// ChallengeNonceBytes is the length of the device nonce in a
+	// challenge request.
+	ChallengeNonceBytes = 16
+	// MaxTrackedDevices caps the devices the challenge quota tracks.
+	MaxTrackedDevices = 4096
 	// MaxEventChallenges caps outstanding challenges for one event. One
 	// event cannot take the whole pool from other events.
 	MaxEventChallenges = MaxOutstandingChallenges / 2
@@ -65,7 +74,9 @@ var (
 	ErrBadSignature         = errors.New("device signature does not verify")
 	ErrRateLimited          = errors.New("too many admission requests from this address")
 	ErrTooManyRequests      = errors.New("too many open admission requests for this event")
-	ErrChallengeRateLimited = errors.New("too many challenges from this address")
+	ErrChallengeRateLimited = errors.New("too many challenges for this device")
+	ErrChallengeFailures    = errors.New("too many failed challenge requests from this address")
+	ErrChallengeReplayed    = errors.New("challenge request nonce was already used")
 	ErrCodeSpaceExhausted   = errors.New("no unique confirmation code available")
 	ErrRequestNotFound      = errors.New("no open admission request matches")
 	ErrVenueTimeUnavailable = errors.New("venue time is not usable")
@@ -159,6 +170,19 @@ type RequestReceipt struct {
 	// It is not a secret.
 	Code      string
 	ExpiresIn time.Duration
+}
+
+// ChallengeRequest asks for a challenge. An admitted device signs it so
+// the quota binds to the device, not to a shared source address.
+type ChallengeRequest struct {
+	EventID string
+	// PublicKey is a PKIX DER encoded ECDSA P-256 public key.
+	PublicKey []byte
+	// Nonce is ChallengeNonceBytes random bytes chosen by the device.
+	Nonce []byte
+	// Signature is an ASN.1 ECDSA signature over SHA-256 of
+	// ChallengeRequestMessage(EventID, PublicKey, Nonce).
+	Signature []byte
 }
 
 // TokenRequest asks for a listener token with a signed challenge.

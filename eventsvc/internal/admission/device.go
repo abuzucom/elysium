@@ -20,8 +20,9 @@ const (
 // Domain separation labels keep a signature for one purpose from
 // verifying for another.
 const (
-	requestLabel = "elysium/admission-request/v0"
-	sessionLabel = "elysium/session-challenge/v0"
+	requestLabel   = "elysium/admission-request/v0"
+	sessionLabel   = "elysium/session-challenge/v0"
+	challengeLabel = "elysium/challenge-request/v0"
 )
 
 // DeviceID derives the device identifier from its PKIX DER public key.
@@ -33,6 +34,12 @@ func DeviceID(publicKey []byte) string {
 // RequestMessage returns the bytes a device signs to request admission.
 func RequestMessage(eventID string, publicKey []byte) []byte {
 	return signedMessage(requestLabel, []byte(eventID), publicKey)
+}
+
+// ChallengeRequestMessage returns the bytes a device signs to request a
+// challenge.
+func ChallengeRequestMessage(eventID string, publicKey, nonce []byte) []byte {
+	return signedMessage(challengeLabel, []byte(eventID), publicKey, nonce)
 }
 
 // SessionMessage returns the bytes a device signs to answer a challenge.

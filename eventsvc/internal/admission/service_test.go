@@ -349,7 +349,7 @@ func TestIssueTokenRejectsBadSignature(t *testing.T) {
 	f := newFixture(t)
 	device := newTestDevice(t)
 	f.admit(t, device)
-	challenge, err := f.service.Challenge(testSource, testEventID)
+	challenge, err := f.challenge(t, device, testSource, testEventID)
 	if err != nil {
 		t.Fatalf("Challenge: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestChallengeIsSingleUse(t *testing.T) {
 	f := newFixture(t)
 	device := newTestDevice(t)
 	f.admit(t, device)
-	challenge, err := f.service.Challenge(testSource, testEventID)
+	challenge, err := f.challenge(t, device, testSource, testEventID)
 	if err != nil {
 		t.Fatalf("Challenge: %v", err)
 	}
@@ -382,7 +382,7 @@ func TestChallengeExpires(t *testing.T) {
 	f := newFixture(t)
 	device := newTestDevice(t)
 	f.admit(t, device)
-	challenge, err := f.service.Challenge(testSource, testEventID)
+	challenge, err := f.challenge(t, device, testSource, testEventID)
 	if err != nil {
 		t.Fatalf("Challenge: %v", err)
 	}
@@ -400,7 +400,8 @@ func TestChallengeIsBoundToEvent(t *testing.T) {
 	}
 	device := newTestDevice(t)
 	f.admit(t, device)
-	challenge, err := f.service.Challenge(testSource, "event-2")
+	f.admitFrom(t, device, testSource, "event-2")
+	challenge, err := f.challenge(t, device, testSource, "event-2")
 	if err != nil {
 		t.Fatalf("Challenge: %v", err)
 	}
@@ -495,11 +496,13 @@ func TestOutstandingChallengesAreBounded(t *testing.T) {
 	// together fill it.
 	f.fillChallenges(t, testEventID, MaxEventChallenges, sources)
 	f.fillChallenges(t, "event-2", MaxOutstandingChallenges-MaxEventChallenges, sources)
-	if _, err := f.service.Challenge(sources.next(), "event-3"); !errors.Is(err, ErrTooManyChallenges) {
+	late := newTestDevice(t)
+	f.admitFrom(t, late, sources.next(), "event-3")
+	if _, err := f.challenge(t, late, sources.next(), "event-3"); !errors.Is(err, ErrTooManyChallenges) {
 		t.Fatalf("error = %v, want ErrTooManyChallenges", err)
 	}
 	f.clock.advance(ChallengeLifetime)
-	if _, err := f.service.Challenge(sources.next(), "event-3"); err != nil {
+	if _, err := f.challenge(t, late, sources.next(), "event-3"); err != nil {
 		t.Fatalf("challenge after expiry: %v", err)
 	}
 }

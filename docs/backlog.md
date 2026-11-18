@@ -174,10 +174,32 @@ These Gate 0 findings remain unverified.
 - Each rate limiter tracks at most 4096 source addresses with activity
   inside its window. A new address past that cap is rejected until idle
   addresses age out. Tracked addresses keep their own limit.
-- Challenges carry a per-source quota of 10 per 60-second window, equal
-  to the challenge lifetime. One address therefore holds at most 10
-  outstanding challenges. `Challenge` takes the source address. Calls
-  for unknown or malformed events cost no quota.
+- Challenges carry a per-device quota of 10 per 60-second window,
+  equal to the challenge lifetime. One admitted device therefore holds
+  at most 10 outstanding challenges. The quota tracks at most 4096
+  devices. `Challenge` takes the source address and a signed
+  `ChallengeRequest` (design amendment A1).
+- Each source address may send at most 10 failed challenge requests
+  per 60-second window. Bad signatures, bad nonces, replays, and
+  missing or revoked admissions count. Valid requests, device quota
+  rejections, pool cap rejections, and unknown or malformed events do
+  not count. An address past the budget is refused before signature
+  verification.
+- A device over its quota is refused before signature verification. The
+  check reads the quota without charging it. The device quota and the
+  nonce are charged only once a challenge is issued. A pool cap
+  rejection costs the device nothing and leaves the signed request
+  valid for a retry.
+- Challenge request nonces hold 16 bytes. The service rejects a reused
+  nonce for 60 seconds after first use. A replay captured from the
+  transport after that window spends one slot of the device quota. The
+  replayer cannot answer the resulting challenge without the device
+  key.
+- Residual risk: a sender flooding invalid challenge requests can
+  exhaust the failure budget of a shared address. Per-client
+  addressing and client isolation on VLAN 10 remain the mitigation.
+- Challenge issuance checks admission existence and revocation only.
+  Token issuance still enforces admission expiry.
 - One event holds at most 2048 outstanding challenges, half of the
   4096 pool. One event cannot lock out listeners of another event.
 - One event holds at most 1000 open admission requests. Requests past
