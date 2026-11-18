@@ -163,6 +163,18 @@ These Gate 0 findings remain unverified.
   remains open.
 
 - Broadcaster certificate enrollment, rotation, and revocation procedure.
+- Shared listener tokens: a phone hotspot or tethering puts other phones
+  behind an admitted phone's address. Those phones still need their own
+  admission, because challenges and tokens require the admitted device
+  key. An admitted listener who extracts its token can still hand it
+  on. The token is a bearer JWT that LiveKit does not bind to the device
+  key. LiveKit v1.13.11 disconnects the earlier session when a second
+  participant joins with the same identity, so a shared token admits one
+  listener at a time (`gateway/internal/publish/identity_test.go`).
+  The same rule lets a holder of a shared token disconnect the admitted
+  listener and take its place. Admission is one session at a time, not
+  bound to the device key.
+  Relaying the audio itself stays outside access control.
 
 ## Event service core (experimental configuration and findings)
 
