@@ -18,6 +18,11 @@ import (
 // experimental (docs/backlog.md).
 const adminTokenLifetime = time.Minute
 
+// roomServiceTimeout bounds one room service call whatever the caller's
+// context allows. A stalled LiveKit server cannot hold Revoke or the
+// expiry sweep indefinitely. The value is experimental (docs/backlog.md).
+const roomServiceTimeout = 10 * time.Second
+
 // RoomRemover ends a participant's session in a LiveKit room. Removing a
 // participant that is not in the room succeeds.
 type RoomRemover interface {
@@ -29,6 +34,8 @@ type LiveKitRooms struct {
 	client    livekit.RoomService
 	apiKey    string
 	apiSecret string
+	// timeout bounds each room service call.
+	timeout time.Duration
 }
 
 // NewLiveKitRooms returns a RoomRemover for the LiveKit server at
@@ -50,6 +57,7 @@ func NewLiveKitRooms(serverURL, apiKey, apiSecret string, client *http.Client) (
 		client:    livekit.NewRoomServiceProtobufClient(serverURL, client),
 		apiKey:    apiKey,
 		apiSecret: apiSecret,
+		timeout:   roomServiceTimeout,
 	}, nil
 }
 
@@ -65,17 +73,24 @@ func (r *LiveKitRooms) RemoveParticipant(ctx context.Context, room, identity str
 	}
 	header := make(http.Header)
 	header.Set("Authorization", "Bearer "+token)
-	ctx, err = twirp.WithHTTPRequestHeaders(ctx, header)
+	callCtx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+	callCtx, err = twirp.WithHTTPRequestHeaders(callCtx, header)
 	if err != nil {
 		return fmt.Errorf("attach room admin token: %w", err)
 	}
-	_, err = r.client.RemoveParticipant(ctx, &livekit.RoomParticipantIdentity{Room: room, Identity: identity})
+	_, err = r.client.RemoveParticipant(callCtx, &livekit.RoomParticipantIdentity{Room: room, Identity: identity})
 	var twirpErr twirp.Error
 	if errors.As(err, &twirpErr) && twirpErr.Code() == twirp.NotFound {
 		// The participant already left or never joined.
 		return nil
 	}
 	if err != nil {
+		// twirp reports a cancelled call as an internal error. Surface the
+		// context error so callers can tell a timeout apart.
+		if ctxErr := callCtx.Err(); ctxErr != nil {
+			return fmt.Errorf("remove participant: %w", ctxErr)
+		}
 		return fmt.Errorf("remove participant: %w", err)
 	}
 	return nil

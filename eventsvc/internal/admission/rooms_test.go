@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/livekit/protocol/auth"
 	"github.com/livekit/protocol/livekit"
@@ -20,17 +21,32 @@ type removal struct {
 }
 
 // recordingRooms is a RoomRemover that records calls and returns err.
+// A non-nil during runs inside each call, outside the lock, to model
+// work that happens while the room service call is in flight.
 type recordingRooms struct {
 	mu       sync.Mutex
 	err      error
 	removals []removal
+	during   func()
 }
 
 func (r *recordingRooms) RemoveParticipant(_ context.Context, room, identity string) error {
 	r.mu.Lock()
+	during := r.during
+	r.mu.Unlock()
+	if during != nil {
+		during()
+	}
+	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.removals = append(r.removals, removal{room: room, identity: identity})
 	return r.err
+}
+
+func (r *recordingRooms) setDuring(during func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.during = during
 }
 
 func (r *recordingRooms) setErr(err error) {
@@ -259,5 +275,64 @@ func TestNewLiveKitRoomsValidatesConfiguration(t *testing.T) {
 				t.Fatalf("error = %v, want ErrInvalidArgument", err)
 			}
 		})
+	}
+}
+
+func TestExpireAdmissionsKeepsReplacementAdmission(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	expired := f.admit(t, device)
+	beforeEnd := expired.ValidUntil.Add(-time.Hour)
+	f.clock.set(synchronizedAt(expired.ValidUntil))
+	// The venue clock steps back during the removal call, for example on
+	// a resync. Staff approve the device again in that window.
+	f.rooms.setDuring(func() {
+		f.rooms.setDuring(nil)
+		f.clock.set(synchronizedAt(beforeEnd))
+		f.admitFrom(t, device, testSource, testEventID)
+	})
+	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); err != nil {
+		t.Fatalf("ExpireAdmissions: %v", err)
+	}
+	replacement, ok := f.service.cfg.Store.Admission(testEventID, expired.DeviceID)
+	if !ok {
+		t.Fatal("replacement admission missing")
+	}
+	if replacement.ApprovedAt.Equal(expired.ApprovedAt) {
+		t.Fatal("replacement admission was not stored")
+	}
+	if replacement.RoomRemoved {
+		t.Fatal("expiry marked the replacement admission as removed")
+	}
+}
+
+func TestLiveKitRoomsTimesOutStalledServer(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Cleanup(func() { close(release) })
+	rooms := newTestLiveKitRooms(t, server.URL)
+	rooms.timeout = 50 * time.Millisecond
+	done := make(chan error, 1)
+	go func() { done <- rooms.RemoveParticipant(context.Background(), testEventID, "device-1") }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("error = %v, want context.DeadlineExceeded", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RemoveParticipant still blocked on a stalled server")
+	}
+}
+
+func TestNewLiveKitRoomsBoundsEachCall(t *testing.T) {
+	rooms := newTestLiveKitRooms(t, "http://127.0.0.1:7880")
+	if rooms.timeout != roomServiceTimeout || roomServiceTimeout <= 0 {
+		t.Fatalf("timeout = %v, want the positive roomServiceTimeout %v", rooms.timeout, roomServiceTimeout)
 	}
 }

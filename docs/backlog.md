@@ -234,10 +234,12 @@ These Gate 0 findings remain unverified.
   a repeated `Revoke` retries it. `ExpireAdmissions` removes devices
   whose admission ended by the latest possible venue time and records
   the removal on the admission. A failed removal is retried on the next
-  call. The server loop that calls it periodically does not exist yet.
+  call. A replacement admission approved during the call stays
+  unmarked, so a later sweep still handles it. The server loop that calls it periodically does not exist yet.
 - Room service calls use a room admin token scoped to one room with a
   60-second lifetime. LiveKit checks it against the controller system
-  clock. Removing an absent participant counts as success. Checked
+  clock. Each call times out after 10 seconds whatever the caller's
+  context allows. Removing an absent participant counts as success. Checked
   against LiveKit v1.13.11: an absent participant returns not found,
   and a wrong secret returns unauthenticated.
 - Token issuance accepts only a usable venue estimate. The gateway

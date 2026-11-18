@@ -442,22 +442,22 @@ func (s *Service) ExpireAdmissions(ctx context.Context, eventID string) (int, er
 	removed := 0
 	failures := make([]error, 0)
 	// Room service calls run outside the lock, like Revoke.
-	for _, deviceID := range ended {
-		if err := s.cfg.Rooms.RemoveParticipant(ctx, eventID, deviceID); err != nil {
-			failures = append(failures, fmt.Errorf("remove device %s: %w", deviceID, err))
+	for _, admission := range ended {
+		if err := s.cfg.Rooms.RemoveParticipant(ctx, eventID, admission.DeviceID); err != nil {
+			failures = append(failures, fmt.Errorf("remove device %s: %w", admission.DeviceID, err))
 			continue
 		}
-		s.markRoomRemoved(eventID, deviceID)
+		s.markRoomRemoved(admission)
 		removed++
 	}
 	return removed, errors.Join(failures...)
 }
 
-// endedAdmissions returns devices whose admission ended by the latest
-// possible venue time and that are not yet removed from the room. The
-// test matches the approval check, so a device leaves the room no later
-// than token issuance stops.
-func (s *Service) endedAdmissions(eventID string) ([]string, error) {
+// endedAdmissions returns admissions that ended by the latest possible
+// venue time and whose device is not yet removed from the room. The test
+// matches the approval check, so a device leaves the room no later than
+// token issuance stops.
+func (s *Service) endedAdmissions(eventID string) ([]Admission, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, err := s.event(eventID); err != nil {
@@ -467,25 +467,29 @@ func (s *Service) endedAdmissions(eventID string) ([]string, error) {
 	if !venue.usable() {
 		return nil, ErrVenueTimeUnavailable
 	}
-	ended := make([]string, 0)
+	ended := make([]Admission, 0)
 	for _, admission := range s.cfg.Store.Admissions(eventID) {
 		if admission.RoomRemoved || venue.latest().Before(admission.ValidUntil) {
 			continue
 		}
-		ended = append(ended, admission.DeviceID)
+		ended = append(ended, admission)
 	}
 	return ended, nil
 }
 
-func (s *Service) markRoomRemoved(eventID, deviceID string) {
+// markRoomRemoved records the removal on the ended admission. Staff may
+// approve the device again while the room service call is in flight. The
+// approval instant identifies the admission, so a replacement stays
+// unmarked and a later sweep handles it.
+func (s *Service) markRoomRemoved(ended Admission) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	admission, ok := s.cfg.Store.Admission(eventID, deviceID)
-	if !ok {
+	current, ok := s.cfg.Store.Admission(ended.EventID, ended.DeviceID)
+	if !ok || !current.ApprovedAt.Equal(ended.ApprovedAt) || !current.ValidUntil.Equal(ended.ValidUntil) {
 		return
 	}
-	admission.RoomRemoved = true
-	s.cfg.Store.PutAdmission(admission)
+	current.RoomRemoved = true
+	s.cfg.Store.PutAdmission(current)
 }
 
 func (s *Service) consumeChallenge(eventID string, value []byte) bool {
