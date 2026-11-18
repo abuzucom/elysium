@@ -26,9 +26,11 @@ const (
 	DefaultGrace = 4 * time.Hour
 	MaxGrace     = 6 * time.Hour
 	// TokenLifetime is the listener token lifetime. TokenRefreshAfter is
-	// when the app refreshes a full-lifetime token.
-	TokenLifetime     = 60 * time.Minute
-	TokenRefreshAfter = 30 * time.Minute
+	// when the app refreshes a full-lifetime token. Amendment A2 shortened
+	// both. A shared or leaked token stays usable for at most one
+	// lifetime.
+	TokenLifetime     = 10 * time.Minute
+	TokenRefreshAfter = 5 * time.Minute
 )
 
 // Experimental values. They carry no approval (docs/backlog.md).

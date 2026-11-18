@@ -462,14 +462,16 @@ func TestIssueTokenEndsAtAdmissionValidity(t *testing.T) {
 	f := newFixture(t)
 	device := newTestDevice(t)
 	admission := f.admit(t, device)
-	f.clock.set(synchronizedAt(admission.ValidUntil.Add(-20 * time.Minute)))
+	// The admission ends before a full token lifetime would.
+	remaining := TokenLifetime - 2*time.Minute
+	f.clock.set(synchronizedAt(admission.ValidUntil.Add(-remaining)))
 	token, err := f.token(t, device)
 	if err != nil {
 		t.Fatalf("IssueToken: %v", err)
 	}
 	// The latest possible venue time includes the uncertainty. Lifetimes
 	// truncate to whole seconds for the JWT expiry claim.
-	if want := 20*time.Minute - time.Second; token.ValidFor != want {
+	if want := remaining - time.Second; token.ValidFor != want {
 		t.Fatalf("valid for %v, want %v", token.ValidFor, want)
 	}
 	if want := token.ValidFor / 2; token.RefreshAfter != want {
@@ -698,5 +700,35 @@ func TestMemoryStoreCopiesGrace(t *testing.T) {
 	again, _ := store.Event(testEventID)
 	if *again.Grace != time.Hour {
 		t.Fatalf("stored grace changed through a returned event: %v", *again.Grace)
+	}
+}
+
+// Values approved in design amendment A2 (docs/design/event-flow-v0.md).
+const (
+	amendmentTokenLifetime     = 10 * time.Minute
+	amendmentTokenRefreshAfter = 5 * time.Minute
+)
+
+func TestIssueTokenUsesAmendedLifetime(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	f.admit(t, device)
+	token, err := f.token(t, device)
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+	if token.ValidFor != amendmentTokenLifetime {
+		t.Fatalf("valid for %v, want %v", token.ValidFor, amendmentTokenLifetime)
+	}
+	if token.RefreshAfter != amendmentTokenRefreshAfter {
+		t.Fatalf("refresh after %v, want %v", token.RefreshAfter, amendmentTokenRefreshAfter)
+	}
+	claims := mustDecodeToken(t, token.JWT, f.clock.System())
+	if lifetime := claims.ExpiresAt.Sub(claims.NotBefore.Time); lifetime != amendmentTokenLifetime {
+		t.Fatalf("jwt lifetime %v, want %v", lifetime, amendmentTokenLifetime)
+	}
+	expired := f.clock.System().Add(amendmentTokenLifetime)
+	if _, err := decodeToken(t, token.JWT, expired); !isExpired(err) {
+		t.Fatalf("token still valid %v after issue: %v", amendmentTokenLifetime, err)
 	}
 }
