@@ -176,6 +176,11 @@ func newFixture(t *testing.T) fixture {
 
 func newFixtureWithRandom(t *testing.T, random interface{ Read([]byte) (int, error) }) fixture {
 	t.Helper()
+	return newFixtureWith(t, random, NewMemoryStore())
+}
+
+func newFixtureWith(t *testing.T, random interface{ Read([]byte) (int, error) }, store Store) fixture {
+	t.Helper()
 	clock := &fakeClock{venue: synchronizedAt(testEventStart.Add(time.Hour))}
 	rooms := &recordingRooms{}
 	service, err := NewService(Config{
@@ -184,7 +189,7 @@ func newFixtureWithRandom(t *testing.T, random interface{ Read([]byte) (int, err
 		SystemClock:      clock.System,
 		MaxClockOffset:   testMaxClockOffset,
 		Random:           random,
-		Store:            NewMemoryStore(),
+		Store:            store,
 		LiveKitAPIKey:    testAPIKey,
 		LiveKitAPISecret: testAPISecret,
 		Rooms:            rooms,

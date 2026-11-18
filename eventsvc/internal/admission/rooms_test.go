@@ -2,6 +2,7 @@ package admission
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -578,5 +579,59 @@ func TestNewLiveKitRoomsRequiresTLSOffLoopback(t *testing.T) {
 		if _, err := NewLiveKitRooms(serverURL, testAPIKey, testAPISecret, http.DefaultClient); err != nil {
 			t.Fatalf("NewLiveKitRooms(%q): %v", serverURL, err)
 		}
+	}
+}
+
+// countingStore records how many admissions each paged read returns.
+type countingStore struct {
+	*MemoryStore
+	mu   sync.Mutex
+	read int
+}
+
+func (s *countingStore) AdmissionsAfter(eventID, afterDeviceID string, limit int) []Admission {
+	page := s.MemoryStore.AdmissionsAfter(eventID, afterDeviceID, limit)
+	s.mu.Lock()
+	s.read += len(page)
+	s.mu.Unlock()
+	return page
+}
+
+func (s *countingStore) takeRead() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	read := s.read
+	s.read = 0
+	return read
+}
+
+func TestExpireAdmissionsReadsOnePagePerSweep(t *testing.T) {
+	store := &countingStore{MemoryStore: NewMemoryStore()}
+	f := newFixtureWith(t, rand.Reader, store)
+	admissions := f.admitMany(t, maxRemovalsPerSweep+50)
+	store.takeRead()
+	// No admission has ended yet, so the sweep finds nothing to remove,
+	// but it must still read only one page.
+	if removed, err := f.service.ExpireAdmissions(context.Background(), testEventID); err != nil || removed != 0 {
+		t.Fatalf("removed %d, error %v, want 0 and nil", removed, err)
+	}
+	if read := store.takeRead(); read > maxRemovalsPerSweep {
+		t.Fatalf("sweep read %d admissions, want at most %d", read, maxRemovalsPerSweep)
+	}
+	// Two sweeps reach every admission once they have ended.
+	f.clock.set(synchronizedAt(admissions[0].ValidUntil))
+	total := 0
+	for range 2 {
+		removed, err := f.service.ExpireAdmissions(context.Background(), testEventID)
+		if err != nil {
+			t.Fatalf("ExpireAdmissions: %v", err)
+		}
+		total += removed
+		if read := store.takeRead(); read > maxRemovalsPerSweep {
+			t.Fatalf("sweep read %d admissions, want at most %d", read, maxRemovalsPerSweep)
+		}
+	}
+	if total != len(admissions) {
+		t.Fatalf("two sweeps removed %d, want %d", total, len(admissions))
 	}
 }

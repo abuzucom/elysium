@@ -493,11 +493,12 @@ const maxRemovalsPerSweep = 256
 // then likely unreachable and each further call would wait out its own
 // timeout. Other failures skip only that device.
 func (s *Service) ExpireAdmissions(ctx context.Context, eventID string) (int, error) {
-	ended, err := s.endedAdmissions(eventID)
+	ended, lastRead, err := s.endedAdmissions(eventID)
 	if err != nil {
 		return 0, err
 	}
 	removed, attempted, failed := 0, 0, 0
+	stoppedEarly := false
 	var firstFailure error
 	// Room service calls run outside the lock, like Revoke.
 	for _, admission := range ended {
@@ -521,8 +522,15 @@ func (s *Service) ExpireAdmissions(ctx context.Context, eventID string) (int, er
 			firstFailure = fmt.Errorf("remove device %s: %w", admission.DeviceID, err)
 		}
 		if errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+			stoppedEarly = true
 			break
 		}
+	}
+	// A full sweep continues after its whole page next time. A stopped
+	// sweep continues after the last device it attempted, so the rest of
+	// its page comes first.
+	if !stoppedEarly && lastRead != "" {
+		s.setSweepCursor(eventID, lastRead)
 	}
 	if firstFailure != nil {
 		// The error keeps one sample and a count, so its size does not
@@ -532,38 +540,43 @@ func (s *Service) ExpireAdmissions(ctx context.Context, eventID string) (int, er
 	return removed, nil
 }
 
-// endedAdmissions returns admissions that ended by the latest possible
-// venue time and whose device is not yet removed from the room. The test
-// matches the approval check, so a device leaves the room no later than
-// token issuance stops.
-func (s *Service) endedAdmissions(eventID string) ([]Admission, error) {
+// endedAdmissions reads one page of the event's admissions, starting
+// after the sweep cursor and wrapping around once, and returns those that
+// ended by the latest possible venue time and whose device is not yet
+// removed from the room. It also returns the last device ID read. The
+// test matches the approval check, so a device leaves the room no later
+// than token issuance stops. The page bounds the work of one sweep
+// however large the event grows.
+func (s *Service) endedAdmissions(eventID string) ([]Admission, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, err := s.event(eventID); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	venue := s.cfg.Clock.Now()
 	if !venue.usable() {
-		return nil, ErrVenueTimeUnavailable
+		return nil, "", ErrVenueTimeUnavailable
 	}
-	// The sweep starts after the device the previous sweep attempted last
-	// and wraps around. Admissions that keep failing cannot hold every
-	// slot of every sweep.
 	cursor := s.sweepCursors[eventID]
-	after := make([]Admission, 0)
-	wrapped := make([]Admission, 0)
-	for _, admission := range s.cfg.Store.Admissions(eventID) {
+	page := s.cfg.Store.AdmissionsAfter(eventID, cursor, maxRemovalsPerSweep)
+	if remaining := maxRemovalsPerSweep - len(page); remaining > 0 && cursor != "" {
+		for _, admission := range s.cfg.Store.AdmissionsAfter(eventID, "", remaining) {
+			if admission.DeviceID > cursor {
+				break
+			}
+			page = append(page, admission)
+		}
+	}
+	ended := make([]Admission, 0)
+	lastRead := ""
+	for _, admission := range page {
+		lastRead = admission.DeviceID
 		if admission.RoomRemoved || venue.latest().Before(admission.ValidUntil) {
 			continue
 		}
-		if admission.DeviceID > cursor {
-			after = append(after, admission)
-			continue
-		}
-		wrapped = append(wrapped, admission)
+		ended = append(ended, admission)
 	}
-	ended := append(after, wrapped...)
-	return ended[:min(len(ended), maxRemovalsPerSweep)], nil
+	return ended, lastRead, nil
 }
 
 func (s *Service) setSweepCursor(eventID, deviceID string) {
