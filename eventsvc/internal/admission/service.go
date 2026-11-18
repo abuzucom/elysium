@@ -2,8 +2,10 @@ package admission
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -49,6 +51,9 @@ type Config struct {
 	// stays on the venue controller.
 	LiveKitAPIKey    string
 	LiveKitAPISecret string
+	// Rooms removes participants from LiveKit rooms on revocation and
+	// at admission end. Production code passes a LiveKitRooms.
+	Rooms RoomRemover
 }
 
 func (cfg Config) validate() error {
@@ -65,6 +70,8 @@ func (cfg Config) validate() error {
 		return fmt.Errorf("%w: random source is required", ErrInvalidArgument)
 	case cfg.Store == nil:
 		return fmt.Errorf("%w: store is required", ErrInvalidArgument)
+	case cfg.Rooms == nil:
+		return fmt.Errorf("%w: room remover is required", ErrInvalidArgument)
 	case cfg.LiveKitAPIKey == "":
 		return fmt.Errorf("%w: LiveKit API key is required", ErrInvalidArgument)
 	case len(cfg.LiveKitAPISecret) < MinLiveKitSecretBytes:
@@ -248,9 +255,22 @@ func findByCode(requests []Request, code string) (Request, bool) {
 	return Request{}, false
 }
 
-// Revoke marks an admission revoked. Refresh stops. A token already issued
-// expires on its own unless the participant is removed from the room.
-func (s *Service) Revoke(eventID, deviceID string) error {
+// Revoke marks an admission revoked and removes the device from the event
+// room. Refresh stops at once. The admission stays revoked when removal
+// fails. A repeated Revoke retries the removal.
+func (s *Service) Revoke(ctx context.Context, eventID, deviceID string) error {
+	if err := s.markRevoked(eventID, deviceID); err != nil {
+		return err
+	}
+	// The room service call runs outside the lock. A slow LiveKit server
+	// must not stall admission and token issuance.
+	if err := s.cfg.Rooms.RemoveParticipant(ctx, eventID, deviceID); err != nil {
+		return fmt.Errorf("admission revoked, room removal failed: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) markRevoked(eventID, deviceID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	admission, ok := s.cfg.Store.Admission(eventID, deviceID)
@@ -410,6 +430,64 @@ func (s *Service) removeChallenge(key string) {
 
 // consumeChallenge removes a challenge and reports whether it was valid
 // for the event. Any lookup consumes the challenge.
+// ExpireAdmissions removes devices whose admission for the event has
+// ended from the event room. It returns the number of devices removed.
+// A failed removal is retried on the next call. The server loop calls it
+// periodically for each event.
+func (s *Service) ExpireAdmissions(ctx context.Context, eventID string) (int, error) {
+	ended, err := s.endedAdmissions(eventID)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	failures := make([]error, 0)
+	// Room service calls run outside the lock, like Revoke.
+	for _, deviceID := range ended {
+		if err := s.cfg.Rooms.RemoveParticipant(ctx, eventID, deviceID); err != nil {
+			failures = append(failures, fmt.Errorf("remove device %s: %w", deviceID, err))
+			continue
+		}
+		s.markRoomRemoved(eventID, deviceID)
+		removed++
+	}
+	return removed, errors.Join(failures...)
+}
+
+// endedAdmissions returns devices whose admission ended by the latest
+// possible venue time and that are not yet removed from the room. The
+// test matches the approval check, so a device leaves the room no later
+// than token issuance stops.
+func (s *Service) endedAdmissions(eventID string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.event(eventID); err != nil {
+		return nil, err
+	}
+	venue := s.cfg.Clock.Now()
+	if !venue.usable() {
+		return nil, ErrVenueTimeUnavailable
+	}
+	ended := make([]string, 0)
+	for _, admission := range s.cfg.Store.Admissions(eventID) {
+		if admission.RoomRemoved || venue.latest().Before(admission.ValidUntil) {
+			continue
+		}
+		ended = append(ended, admission.DeviceID)
+	}
+	return ended, nil
+}
+
+func (s *Service) markRoomRemoved(eventID, deviceID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	admission, ok := s.cfg.Store.Admission(eventID, deviceID)
+	if !ok {
+		return
+	}
+	admission.RoomRemoved = true
+	s.cfg.Store.PutAdmission(admission)
+}
+
 func (s *Service) consumeChallenge(eventID string, value []byte) bool {
 	// Generated challenges are exactly challengeBytes long. Rejecting any
 	// other length first bounds work on untrusted input.

@@ -225,11 +225,21 @@ These Gate 0 findings remain unverified.
   `MaxClockOffset` of venue UTC for every token lifetime. The value must
   stay below the 60-second minimum token lifetime. The deployment value
   and how the controller disciplines its system clock remain open.
-- Planned by human decision (2026-11-16): the event service removes a
+- Decided by the active human (2026-11-16): the event service removes a
   participant from the LiveKit room when its admission ends or is
   revoked. Room removal enforces the admission end even when the
-  controller clock leaves its bound. It needs the LiveKit room service
-  API in a later increment.
+  controller clock leaves its bound.
+- `Revoke` removes the device from the event room through the LiveKit
+  room service API. The admission stays revoked when removal fails, and
+  a repeated `Revoke` retries it. `ExpireAdmissions` removes devices
+  whose admission ended by the latest possible venue time and records
+  the removal on the admission. A failed removal is retried on the next
+  call. The server loop that calls it periodically does not exist yet.
+- Room service calls use a room admin token scoped to one room with a
+  60-second lifetime. LiveKit checks it against the controller system
+  clock. Removing an absent participant counts as success. Checked
+  against LiveKit v1.13.11: an absent participant returns not found,
+  and a wrong secret returns unauthenticated.
 - Token issuance accepts only a usable venue estimate. The gateway
   `venuetime` service needs an adapter to the `VenueClock` interface.
 - Open in later increments: the HTTP API, invitation enrollment with

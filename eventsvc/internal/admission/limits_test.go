@@ -1,6 +1,7 @@
 package admission
 
 import (
+	"context"
 	"errors"
 	"net/netip"
 	"strings"
@@ -88,7 +89,7 @@ func TestChallengeRequiresAdmission(t *testing.T) {
 	}
 	revoked := newTestDevice(t)
 	admission := f.admit(t, revoked)
-	if err := f.service.Revoke(testEventID, admission.DeviceID); err != nil {
+	if err := f.service.Revoke(context.Background(), testEventID, admission.DeviceID); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 	if _, err := f.challenge(t, revoked, testSource, testEventID); !errors.Is(err, ErrRevoked) {
@@ -226,7 +227,7 @@ func TestIssueTokenRefusesAdmissionRevokedAfterChallenge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Challenge: %v", err)
 	}
-	if err := f.service.Revoke(testEventID, admission.DeviceID); err != nil {
+	if err := f.service.Revoke(context.Background(), testEventID, admission.DeviceID); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 	if _, err := f.service.IssueToken(device.tokenRequest(t, testEventID, challenge)); !errors.Is(err, ErrRevoked) {
@@ -328,6 +329,7 @@ func TestNewServiceRejectsShortLiveKitSecret(t *testing.T) {
 		Random:         zeroReader{},
 		Store:          NewMemoryStore(),
 		LiveKitAPIKey:  testAPIKey,
+		Rooms:          &recordingRooms{},
 	}
 	cfg.LiveKitAPISecret = strings.Repeat("s", MinLiveKitSecretBytes-1)
 	if _, err := NewService(cfg); !errors.Is(err, ErrInvalidArgument) {

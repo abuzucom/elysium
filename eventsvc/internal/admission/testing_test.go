@@ -166,6 +166,7 @@ func (d testDevice) tokenRequest(t *testing.T, eventID string, challenge []byte)
 type fixture struct {
 	clock   *fakeClock
 	service *Service
+	rooms   *recordingRooms
 }
 
 func newFixture(t *testing.T) fixture {
@@ -176,6 +177,7 @@ func newFixture(t *testing.T) fixture {
 func newFixtureWithRandom(t *testing.T, random interface{ Read([]byte) (int, error) }) fixture {
 	t.Helper()
 	clock := &fakeClock{venue: synchronizedAt(testEventStart.Add(time.Hour))}
+	rooms := &recordingRooms{}
 	service, err := NewService(Config{
 		Clock:            clock,
 		Monotonic:        clock.Monotonic,
@@ -185,6 +187,7 @@ func newFixtureWithRandom(t *testing.T, random interface{ Read([]byte) (int, err
 		Store:            NewMemoryStore(),
 		LiveKitAPIKey:    testAPIKey,
 		LiveKitAPISecret: testAPISecret,
+		Rooms:            rooms,
 	})
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -192,7 +195,7 @@ func newFixtureWithRandom(t *testing.T, random interface{ Read([]byte) (int, err
 	if err := service.AddEvent(Event{ID: testEventID, Start: testEventStart, End: testEventEnd}); err != nil {
 		t.Fatalf("AddEvent: %v", err)
 	}
-	return fixture{clock: clock, service: service}
+	return fixture{clock: clock, service: service, rooms: rooms}
 }
 
 // admit runs the staff approval flow for one device.

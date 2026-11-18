@@ -151,6 +151,9 @@ type Admission struct {
 	ApprovedAt time.Time
 	ValidUntil time.Time
 	Revoked    bool
+	// RoomRemoved records that the service removed the device from the
+	// event room after the admission ended.
+	RoomRemoved bool
 }
 
 // SignedRequest is an admission request signed with the device key.

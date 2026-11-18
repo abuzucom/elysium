@@ -1,6 +1,9 @@
 package admission
 
-import "slices"
+import (
+	"slices"
+	"strings"
+)
 
 // Store holds events, open requests, and admissions. The Service
 // serializes every call, so implementations need no locking of their own.
@@ -13,6 +16,9 @@ type Store interface {
 	PutRequest(request Request)
 	DeleteRequest(eventID, deviceID string)
 	Admission(eventID, deviceID string) (Admission, bool)
+	// Admissions returns the admissions for one event, ordered by device
+	// identifier.
+	Admissions(eventID string) []Admission
 	PutAdmission(admission Admission)
 }
 
@@ -87,6 +93,23 @@ func (s *MemoryStore) Admission(eventID, deviceID string) (Admission, bool) {
 		admission.PublicKey = slices.Clone(admission.PublicKey)
 	}
 	return admission, ok
+}
+
+// Admissions returns the admissions for one event, ordered by device
+// identifier.
+func (s *MemoryStore) Admissions(eventID string) []Admission {
+	admissions := make([]Admission, 0)
+	for key, admission := range s.admissions {
+		if key.eventID != eventID {
+			continue
+		}
+		admission.PublicKey = slices.Clone(admission.PublicKey)
+		admissions = append(admissions, admission)
+	}
+	slices.SortFunc(admissions, func(a, b Admission) int {
+		return strings.Compare(a.DeviceID, b.DeviceID)
+	})
+	return admissions
 }
 
 // PutAdmission stores an admission, replacing the device's earlier one.
