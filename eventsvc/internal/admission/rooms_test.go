@@ -903,3 +903,39 @@ func TestNewServiceRejectsTypedNilRoomsOfAnyKind(t *testing.T) {
 		}
 	}
 }
+
+func TestExpireAdmissionsKeepsRetryReplacedMidSweep(t *testing.T) {
+	f := newFixture(t)
+	first, second := newTestDevice(t), newTestDevice(t)
+	sources := &sourceSequence{}
+	admissions := sortedAdmissions([]Admission{
+		f.admitFrom(t, first, sources.next(), testEventID),
+		f.admitFrom(t, second, sources.next(), testEventID),
+	})
+	devices := map[string]testDevice{first.id(): first, second.id(): second}
+	end := admissions[0].ValidUntil
+	f.clock.set(synchronizedAt(end))
+	// Both removals fail, so both devices go on the retry list.
+	f.rooms.setErr(errRoomService)
+	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); !errors.Is(err, errRoomService) {
+		t.Fatalf("first sweep: error = %v, want the room service error", err)
+	}
+	f.rooms.setErr(nil)
+	later := admissions[1]
+	// After the first retry, staff revoke the later device, which removes
+	// it, and approve it again before the sweep reaches its retry.
+	f.service.removalFinished = func() {
+		f.service.removalFinished = nil
+		if err := f.service.Revoke(context.Background(), testEventID, later.DeviceID, later.ID); err != nil {
+			t.Fatalf("Revoke: %v", err)
+		}
+		f.clock.set(synchronizedAt(end.Add(-time.Hour)))
+		f.admitFrom(t, devices[later.DeviceID], sources.next(), testEventID)
+	}
+	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	if !slices.Contains(f.service.retryRemovals[testEventID], later.DeviceID) {
+		t.Fatalf("retry list %v dropped the replaced device %s", f.service.retryRemovals[testEventID], later.DeviceID)
+	}
+}

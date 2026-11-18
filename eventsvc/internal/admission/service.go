@@ -547,7 +547,7 @@ func (s *Service) ExpireAdmissions(ctx context.Context, eventID string) (int, er
 	if err != nil {
 		return 0, err
 	}
-	result := sweepResult{failedAt: make(map[int]bool)}
+	result := sweepResult{failedAt: make(map[int]bool), skippedAt: make(map[int]bool)}
 	var firstFailure error
 	// Room service calls run outside the lock, like Revoke.
 	for i, item := range plan.items {
@@ -555,6 +555,7 @@ func (s *Service) ExpireAdmissions(ctx context.Context, eventID string) (int, er
 		// selected it. Skip it then, so the call cannot end the
 		// replacement's session. Approval waits while the call runs.
 		if !s.beginRemoval(item.admission) {
+			result.skippedAt[i] = true
 			result.reached = i + 1
 			continue
 		}
@@ -615,6 +616,8 @@ type sweepResult struct {
 	// not tried because the sweep stopped.
 	reached  int
 	failedAt map[int]bool
+	// skippedAt marks items whose admission changed before the call.
+	skippedAt map[int]bool
 }
 
 // needsRemoval reports whether the device must leave the room: its
@@ -700,9 +703,11 @@ func (s *Service) finishSweep(eventID string, plan sweepPlan, result sweepResult
 		if item.fromPage {
 			continue
 		}
-		// A retry device the sweep did not reach, or whose call failed,
-		// stays on the list.
-		if i >= result.reached || result.failedAt[i] {
+		// A retry device stays on the list until its current admission is
+		// removed: when the sweep did not reach it, when its call failed,
+		// and when staff approved it again before the call. The next sweep
+		// resolves the device to its current admission.
+		if i >= result.reached || result.failedAt[i] || result.skippedAt[i] {
 			retry = append(retry, item.admission.DeviceID)
 		}
 	}
