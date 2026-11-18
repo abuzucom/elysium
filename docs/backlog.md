@@ -235,7 +235,10 @@ These Gate 0 findings remain unverified.
   whose admission ended by the latest possible venue time and records
   the removal on the admission. A failed removal is retried on the next
   call. A replacement admission approved during the call stays
-  unmarked, so a later sweep still handles it. The server loop that calls it periodically does not exist yet.
+  unmarked, so a later sweep still handles it. One sweep handles at
+  most 256 admissions. A timeout ends the sweep at once, because the
+  room service is then likely unreachable. Other failures skip only
+  that device. The error reports a failure count and the first failure. The server loop that calls it periodically does not exist yet.
 - Room service calls use a room admin token scoped to one room with a
   60-second lifetime. LiveKit checks it against the controller system
   clock. Each call times out after 10 seconds whatever the caller's

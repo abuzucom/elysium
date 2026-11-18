@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -334,5 +335,65 @@ func TestNewLiveKitRoomsBoundsEachCall(t *testing.T) {
 	rooms := newTestLiveKitRooms(t, "http://127.0.0.1:7880")
 	if rooms.timeout != roomServiceTimeout || roomServiceTimeout <= 0 {
 		t.Fatalf("timeout = %v, want the positive roomServiceTimeout %v", rooms.timeout, roomServiceTimeout)
+	}
+}
+
+// admitMany admits count new devices to the test event from distinct
+// source addresses.
+func (f fixture) admitMany(t *testing.T, count int) []Admission {
+	t.Helper()
+	sources := &sourceSequence{}
+	admissions := make([]Admission, count)
+	for i := range admissions {
+		admissions[i] = f.admitFrom(t, newTestDevice(t), sources.next(), testEventID)
+	}
+	return admissions
+}
+
+func TestExpireAdmissionsStopsAfterTimeout(t *testing.T) {
+	f := newFixture(t)
+	admissions := f.admitMany(t, 3)
+	f.clock.set(synchronizedAt(admissions[0].ValidUntil))
+	f.rooms.setErr(context.DeadlineExceeded)
+	removed, err := f.service.ExpireAdmissions(context.Background(), testEventID)
+	if !errors.Is(err, context.DeadlineExceeded) || removed != 0 {
+		t.Fatalf("removed %d, error %v, want 0 and context.DeadlineExceeded", removed, err)
+	}
+	if calls := f.rooms.take(); len(calls) != 1 {
+		t.Fatalf("sweep made %d room calls after a timeout, want 1", len(calls))
+	}
+}
+
+func TestExpireAdmissionsContinuesAfterOtherFailures(t *testing.T) {
+	f := newFixture(t)
+	admissions := f.admitMany(t, 3)
+	f.clock.set(synchronizedAt(admissions[0].ValidUntil))
+	f.rooms.setErr(errRoomService)
+	removed, err := f.service.ExpireAdmissions(context.Background(), testEventID)
+	if !errors.Is(err, errRoomService) || removed != 0 {
+		t.Fatalf("removed %d, error %v, want 0 and the room service error", removed, err)
+	}
+	if calls := f.rooms.take(); len(calls) != 3 {
+		t.Fatalf("sweep made %d room calls, want 3", len(calls))
+	}
+	if !strings.Contains(err.Error(), "3 of 3") {
+		t.Fatalf("error %q does not report the failure count", err)
+	}
+	if strings.Count(err.Error(), errRoomService.Error()) != 1 {
+		t.Fatalf("error %q repeats each failure, want one sample", err)
+	}
+}
+
+func TestExpireAdmissionsBoundsOneSweep(t *testing.T) {
+	f := newFixture(t)
+	admissions := f.admitMany(t, maxRemovalsPerSweep+1)
+	f.clock.set(synchronizedAt(admissions[0].ValidUntil))
+	removed, err := f.service.ExpireAdmissions(context.Background(), testEventID)
+	if err != nil || removed != maxRemovalsPerSweep {
+		t.Fatalf("first sweep: removed %d, error %v, want %d and nil", removed, err, maxRemovalsPerSweep)
+	}
+	removed, err = f.service.ExpireAdmissions(context.Background(), testEventID)
+	if err != nil || removed != 1 {
+		t.Fatalf("second sweep: removed %d, error %v, want 1 and nil", removed, err)
 	}
 }

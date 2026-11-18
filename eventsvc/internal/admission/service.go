@@ -430,27 +430,49 @@ func (s *Service) removeChallenge(key string) {
 
 // consumeChallenge removes a challenge and reports whether it was valid
 // for the event. Any lookup consumes the challenge.
+// maxRemovalsPerSweep bounds the room service calls of one
+// ExpireAdmissions call. The value is experimental (docs/backlog.md).
+const maxRemovalsPerSweep = 256
+
 // ExpireAdmissions removes devices whose admission for the event has
 // ended from the event room. It returns the number of devices removed.
 // A failed removal is retried on the next call. The server loop calls it
 // periodically for each event.
+//
+// One call handles at most maxRemovalsPerSweep admissions. A timeout or a
+// cancelled context ends the sweep at once, because the room service is
+// then likely unreachable and each further call would wait out its own
+// timeout. Other failures skip only that device.
 func (s *Service) ExpireAdmissions(ctx context.Context, eventID string) (int, error) {
 	ended, err := s.endedAdmissions(eventID)
 	if err != nil {
 		return 0, err
 	}
-	removed := 0
-	failures := make([]error, 0)
+	removed, attempted, failed := 0, 0, 0
+	var firstFailure error
 	// Room service calls run outside the lock, like Revoke.
 	for _, admission := range ended {
-		if err := s.cfg.Rooms.RemoveParticipant(ctx, eventID, admission.DeviceID); err != nil {
-			failures = append(failures, fmt.Errorf("remove device %s: %w", admission.DeviceID, err))
+		attempted++
+		err := s.cfg.Rooms.RemoveParticipant(ctx, eventID, admission.DeviceID)
+		if err == nil {
+			s.markRoomRemoved(admission)
+			removed++
 			continue
 		}
-		s.markRoomRemoved(admission)
-		removed++
+		failed++
+		if firstFailure == nil {
+			firstFailure = fmt.Errorf("remove device %s: %w", admission.DeviceID, err)
+		}
+		if errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+			break
+		}
 	}
-	return removed, errors.Join(failures...)
+	if firstFailure != nil {
+		// The error keeps one sample and a count, so its size does not
+		// grow with the number of admissions.
+		return removed, fmt.Errorf("%d of %d room removals failed, first: %w", failed, attempted, firstFailure)
+	}
+	return removed, nil
 }
 
 // endedAdmissions returns admissions that ended by the latest possible
@@ -473,6 +495,9 @@ func (s *Service) endedAdmissions(eventID string) ([]Admission, error) {
 			continue
 		}
 		ended = append(ended, admission)
+		if len(ended) == maxRemovalsPerSweep {
+			break
+		}
 	}
 	return ended, nil
 }
