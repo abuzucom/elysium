@@ -5,7 +5,8 @@ decisions below. Any change to these invitation and authorization
 contracts requires new approval (bootstrap section 5). Amendment A1
 (2026-11-18) changes the challenge request in flow 3 and the abuse
 limits. It takes effect when the active human approves its pull
-request.
+request. Amendment A2 (2026-11-18) shortens the listener token lifetime
+to 10 minutes. It takes effect the same way.
 
 ## Purpose
 
@@ -134,9 +135,9 @@ without staff approval.
 
 | Topic | Decision |
 | --- | --- |
-| Listener token | 60-minute lifetime. The app refreshes after 30 minutes. Removing the participant from the room ends access at once |
+| Listener token | 10-minute lifetime. The app refreshes after 5 minutes (amendment A2, replacing 60 and 30 minutes). A shared or leaked token stays usable for at most 10 minutes. Removing the participant from the room ends access at once |
 | Admission validity | Scheduled event end plus a grace period. Grace defaults to 4 hours with a 6-hour maximum. The organizer or event manager sets it per event |
-| Venue time unsynchronized | During holdover, tokens keep issuing with lifetimes shortened by the current uncertainty. Once unsynchronized, new tokens are refused and the technical operator receives an alert |
+| Venue time unsynchronized | During holdover, tokens keep issuing with lifetimes shortened by the current uncertainty. With 10-minute tokens, holdover uncertainty above 9 minutes refuses tokens. Once unsynchronized, new tokens are refused and the technical operator receives an alert |
 | Email verification | One-time code by email, entered in the app |
 | Devices per invitation | One device per invitation. The device replacement procedure stays open |
 | Staff sign-in | Passkeys where supported, with an Argon2id password fallback. All accounts stay local to the venue controller |
