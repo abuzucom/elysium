@@ -252,12 +252,16 @@ These Gate 0 findings remain unverified.
   admission replaced before its call. LiveKit removes by identity only,
   so approval of a device waits with `ErrRemovalPending` while a
   removal call for it runs, from `Revoke` or the sweep. The request
-  stays open, and staff approve it once the call ends. Each sweep
-  starts after the device the previous sweep attempted last, so
-  admissions that keep failing cannot block later ones. One sweep handles at
-  most 256 admissions. A timeout ends the sweep at once, because the
-  room service is then likely unreachable. Other failures skip only
-  that device. The error reports a failure count and the first failure. The server loop that calls it periodically does not exist yet.
+  stays open, and staff approve it once the call ends.
+- One sweep reads one page of at most 256 admissions through
+  `Store.AdmissionsAfter`, so its memory and work stay bounded however
+  large the event grows. Each sweep starts after the previous page and
+  wraps around, so admissions that keep failing cannot block later
+  ones. A timeout ends the sweep at once, because the room service is
+  then likely unreachable, and the next sweep continues after the last
+  device attempted. Other failures skip only that device. The error
+  reports a failure count and the first failure. The server loop that
+  calls the sweep periodically does not exist yet.
 - Room service calls use a room admin token scoped to one room with a
   60-second lifetime. LiveKit checks it against the controller system
   clock. Each call times out after 10 seconds whatever the caller's
