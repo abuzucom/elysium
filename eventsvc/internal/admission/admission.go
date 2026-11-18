@@ -86,6 +86,7 @@ var (
 	ErrChallengeInvalid     = errors.New("challenge is unknown, used, or expired")
 	ErrTooManyChallenges    = errors.New("too many outstanding challenges")
 	ErrClockOffset          = errors.New("controller system clock is too far from venue UTC")
+	ErrRemovalPending       = errors.New("room removal for this device is still in progress")
 )
 
 // identifierPattern limits event and approver identifiers to characters

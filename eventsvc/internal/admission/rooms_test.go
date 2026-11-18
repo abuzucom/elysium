@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -279,34 +280,6 @@ func TestNewLiveKitRoomsValidatesConfiguration(t *testing.T) {
 	}
 }
 
-func TestExpireAdmissionsKeepsReplacementAdmission(t *testing.T) {
-	f := newFixture(t)
-	device := newTestDevice(t)
-	expired := f.admit(t, device)
-	beforeEnd := expired.ValidUntil.Add(-time.Hour)
-	f.clock.set(synchronizedAt(expired.ValidUntil))
-	// The venue clock steps back during the removal call, for example on
-	// a resync. Staff approve the device again in that window.
-	f.rooms.setDuring(func() {
-		f.rooms.setDuring(nil)
-		f.clock.set(synchronizedAt(beforeEnd))
-		f.admitFrom(t, device, testSource, testEventID)
-	})
-	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); err != nil {
-		t.Fatalf("ExpireAdmissions: %v", err)
-	}
-	replacement, ok := f.service.cfg.Store.Admission(testEventID, expired.DeviceID)
-	if !ok {
-		t.Fatal("replacement admission missing")
-	}
-	if replacement.ApprovedAt.Equal(expired.ApprovedAt) {
-		t.Fatal("replacement admission was not stored")
-	}
-	if replacement.RoomRemoved {
-		t.Fatal("expiry marked the replacement admission as removed")
-	}
-}
-
 func TestLiveKitRoomsTimesOutStalledServer(t *testing.T) {
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -398,36 +371,6 @@ func TestExpireAdmissionsBoundsOneSweep(t *testing.T) {
 	}
 }
 
-func TestExpireAdmissionsKeepsReplacementWithSameTimestamps(t *testing.T) {
-	f := newFixture(t)
-	device := newTestDevice(t)
-	expired := f.admit(t, device)
-	f.clock.set(synchronizedAt(expired.ValidUntil))
-	// The venue clock returns to the original approval instant, so the
-	// replacement carries the same approval and validity times.
-	f.rooms.setDuring(func() {
-		f.rooms.setDuring(nil)
-		f.clock.set(synchronizedAt(expired.ApprovedAt))
-		f.admitFrom(t, device, testSource, testEventID)
-	})
-	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); err != nil {
-		t.Fatalf("ExpireAdmissions: %v", err)
-	}
-	replacement, ok := f.service.cfg.Store.Admission(testEventID, expired.DeviceID)
-	if !ok {
-		t.Fatal("replacement admission missing")
-	}
-	if !replacement.ApprovedAt.Equal(expired.ApprovedAt) || !replacement.ValidUntil.Equal(expired.ValidUntil) {
-		t.Fatal("test setup: replacement timestamps differ from the expired admission")
-	}
-	if replacement.ID == expired.ID {
-		t.Fatal("replacement admission reuses the expired admission ID")
-	}
-	if replacement.RoomRemoved {
-		t.Fatal("expiry marked the replacement admission as removed")
-	}
-}
-
 func TestExpireAdmissionsSkipsAdmissionReplacedBeforeItsCall(t *testing.T) {
 	f := newFixture(t)
 	first, second := newTestDevice(t), newTestDevice(t)
@@ -490,5 +433,128 @@ func TestNewLiveKitRoomsRejectsAmbiguousURLs(t *testing.T) {
 	}
 	if _, err := NewLiveKitRooms("https://proxy.example/livekit", testAPIKey, testAPISecret, http.DefaultClient); err != nil {
 		t.Fatalf("path prefix behind a proxy: %v", err)
+	}
+}
+
+// requestAndApprove sends a fresh admission request for the device and
+// tries to approve it. It returns the receipt and the approval result.
+func (f fixture) requestAndApprove(t *testing.T, device testDevice, source netip.Addr) (RequestReceipt, Admission, error) {
+	t.Helper()
+	receipt, err := f.service.RequestAdmission(source, device.admissionRequest(t, testEventID))
+	if err != nil {
+		t.Fatalf("RequestAdmission: %v", err)
+	}
+	admission, err := f.service.Approve(testEventID, receipt.Code, testApprover)
+	return receipt, admission, err
+}
+
+func TestExpireAdmissionsBlocksReapprovalDuringRemoval(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	expired := f.admit(t, device)
+	beforeEnd := expired.ValidUntil.Add(-time.Hour)
+	f.clock.set(synchronizedAt(expired.ValidUntil))
+	var receipt RequestReceipt
+	var duringErr error
+	// The venue clock steps back during the removal call, for example on
+	// a resync, and staff try to approve the device again.
+	f.rooms.setDuring(func() {
+		f.rooms.setDuring(nil)
+		f.clock.set(synchronizedAt(beforeEnd))
+		receipt, _, duringErr = f.requestAndApprove(t, device, testSource)
+	})
+	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); err != nil {
+		t.Fatalf("ExpireAdmissions: %v", err)
+	}
+	if !errors.Is(duringErr, ErrRemovalPending) {
+		t.Fatalf("approval during removal: error = %v, want ErrRemovalPending", duringErr)
+	}
+	replacement, err := f.service.Approve(testEventID, receipt.Code, testApprover)
+	if err != nil {
+		t.Fatalf("approval after removal: %v", err)
+	}
+	if replacement.ID == expired.ID || replacement.RoomRemoved {
+		t.Fatalf("replacement %+v, want a new unmarked admission", replacement)
+	}
+}
+
+func TestRevokeBlocksReapprovalDuringRemoval(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	revoked := f.admit(t, device)
+	var receipt RequestReceipt
+	var duringErr error
+	f.rooms.setDuring(func() {
+		f.rooms.setDuring(nil)
+		receipt, _, duringErr = f.requestAndApprove(t, device, testSource)
+	})
+	if err := f.service.Revoke(context.Background(), testEventID, revoked.DeviceID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if !errors.Is(duringErr, ErrRemovalPending) {
+		t.Fatalf("approval during removal: error = %v, want ErrRemovalPending", duringErr)
+	}
+	if calls := f.rooms.take(); len(calls) != 1 {
+		t.Fatalf("Revoke made %d removals, want 1", len(calls))
+	}
+	if _, err := f.service.Approve(testEventID, receipt.Code, testApprover); err != nil {
+		t.Fatalf("approval after removal: %v", err)
+	}
+}
+
+func TestExpireAdmissionsTellsReplacementApartBySameTimestamps(t *testing.T) {
+	f := newFixture(t)
+	first, second := newTestDevice(t), newTestDevice(t)
+	sources := &sourceSequence{}
+	ended := []Admission{
+		f.admitFrom(t, first, sources.next(), testEventID),
+		f.admitFrom(t, second, sources.next(), testEventID),
+	}
+	devices := map[string]testDevice{ended[0].DeviceID: first, ended[1].DeviceID: second}
+	if ended[1].DeviceID < ended[0].DeviceID {
+		ended[0], ended[1] = ended[1], ended[0]
+	}
+	f.clock.set(synchronizedAt(ended[0].ValidUntil))
+	// During the first call the venue clock returns to the second
+	// admission's approval instant, so its replacement carries the same
+	// approval and validity times. Only the admission ID differs.
+	f.rooms.setDuring(func() {
+		f.rooms.setDuring(nil)
+		f.clock.set(synchronizedAt(ended[1].ApprovedAt))
+		f.admitFrom(t, devices[ended[1].DeviceID], sources.next(), testEventID)
+	})
+	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); err != nil {
+		t.Fatalf("ExpireAdmissions: %v", err)
+	}
+	if calls := f.rooms.take(); len(calls) != 1 || calls[0].identity != ended[0].DeviceID {
+		t.Fatalf("removals = %v, want only %s", calls, ended[0].DeviceID)
+	}
+	replacement, ok := f.service.cfg.Store.Admission(testEventID, ended[1].DeviceID)
+	if !ok || !replacement.ApprovedAt.Equal(ended[1].ApprovedAt) || replacement.ID == ended[1].ID {
+		t.Fatalf("test setup: replacement %+v, want same timestamps and a new ID", replacement)
+	}
+	if replacement.RoomRemoved {
+		t.Fatal("replacement admission marked removed")
+	}
+}
+
+func TestExpireAdmissionsResumesAfterPreviousSweep(t *testing.T) {
+	f := newFixture(t)
+	admissions := f.admitMany(t, maxRemovalsPerSweep+1)
+	f.clock.set(synchronizedAt(admissions[0].ValidUntil))
+	f.rooms.setErr(errRoomService)
+	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); !errors.Is(err, errRoomService) {
+		t.Fatalf("first sweep: error = %v, want the room service error", err)
+	}
+	attempted := map[string]bool{}
+	for _, call := range f.rooms.take() {
+		attempted[call.identity] = true
+	}
+	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); !errors.Is(err, errRoomService) {
+		t.Fatalf("second sweep: error = %v, want the room service error", err)
+	}
+	second := f.rooms.take()
+	if len(second) == 0 || attempted[second[0].identity] {
+		t.Fatalf("second sweep starts with %v, want the admission the first sweep never reached", second[:min(1, len(second))])
 	}
 }

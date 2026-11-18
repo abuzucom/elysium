@@ -113,8 +113,15 @@ type Service struct {
 	// deviceChallenges counts challenges per admitted device.
 	deviceChallenges *rateLimiter[string]
 	// nonces holds recent challenge request nonces and their expiry.
-	nonces     map[nonceKey]time.Duration
-	challenges map[string]challenge
+	nonces map[nonceKey]time.Duration
+	// pendingRemovals counts room removal calls in flight per device.
+	// Approval waits until the count drops to zero, because LiveKit
+	// removes by identity and would end a replacement's session.
+	pendingRemovals map[deviceKey]int
+	// sweepCursors holds the last device ID each event's expiry sweep
+	// attempted. The next sweep starts after it.
+	sweepCursors map[string]string
+	challenges   map[string]challenge
 	// eventChallenges counts outstanding challenges per event.
 	eventChallenges map[string]int
 }
@@ -130,6 +137,8 @@ func NewService(cfg Config) (*Service, error) {
 		challengeFailures: newRateLimiter[netip.Addr](ChallengeFailureLimit, ChallengeRateWindow, MaxTrackedAddresses),
 		deviceChallenges:  newRateLimiter[string](ChallengeRateLimit, ChallengeRateWindow, MaxTrackedDevices),
 		nonces:            make(map[nonceKey]time.Duration),
+		pendingRemovals:   make(map[deviceKey]int),
+		sweepCursors:      make(map[string]string),
 		challenges:        make(map[string]challenge),
 		eventChallenges:   make(map[string]int),
 	}, nil
@@ -238,6 +247,10 @@ func (s *Service) Approve(eventID, code, approverID string) (Admission, error) {
 	if !found {
 		return Admission{}, ErrRequestNotFound
 	}
+	// The request stays open, so staff can approve once removal ends.
+	if s.pendingRemovals[deviceKey{eventID, request.DeviceID}] > 0 {
+		return Admission{}, ErrRemovalPending
+	}
 	venue := s.cfg.Clock.Now()
 	if !venue.usable() {
 		return Admission{}, ErrVenueTimeUnavailable
@@ -281,6 +294,7 @@ func (s *Service) Revoke(ctx context.Context, eventID, deviceID string) error {
 	if err := s.markRevoked(eventID, deviceID); err != nil {
 		return err
 	}
+	defer s.endRemoval(eventID, deviceID)
 	// The room service call runs outside the lock. A slow LiveKit server
 	// must not stall admission and token issuance.
 	if err := s.cfg.Rooms.RemoveParticipant(ctx, eventID, deviceID); err != nil {
@@ -289,6 +303,8 @@ func (s *Service) Revoke(ctx context.Context, eventID, deviceID string) error {
 	return nil
 }
 
+// markRevoked revokes the admission and starts a pending removal in one
+// locked step, so no approval can slip in before the room call.
 func (s *Service) markRevoked(eventID, deviceID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -298,7 +314,21 @@ func (s *Service) markRevoked(eventID, deviceID string) error {
 	}
 	admission.Revoked = true
 	s.cfg.Store.PutAdmission(admission)
+	s.pendingRemovals[deviceKey{eventID, deviceID}]++
 	return nil
+}
+
+// endRemoval ends one pending removal for the device.
+func (s *Service) endRemoval(eventID, deviceID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := deviceKey{eventID, deviceID}
+	remaining := s.pendingRemovals[key] - 1
+	if remaining <= 0 {
+		delete(s.pendingRemovals, key)
+		return
+	}
+	s.pendingRemovals[key] = remaining
 }
 
 // Challenge returns a single-use random challenge bound to one event.
@@ -473,14 +503,14 @@ func (s *Service) ExpireAdmissions(ctx context.Context, eventID string) (int, er
 	for _, admission := range ended {
 		// Staff may have approved the device again since the sweep
 		// selected it. Skip it then, so the call cannot end the
-		// replacement's session. LiveKit removes by identity only, so a
-		// replacement approved during the call itself can still lose its
-		// session. A later sweep handles that admission once it ends.
-		if !s.isCurrentAdmission(admission) {
+		// replacement's session. Approval waits while the call runs.
+		if !s.beginRemoval(admission) {
 			continue
 		}
 		attempted++
+		s.setSweepCursor(eventID, admission.DeviceID)
 		err := s.cfg.Rooms.RemoveParticipant(ctx, eventID, admission.DeviceID)
+		s.endRemoval(eventID, admission.DeviceID)
 		if err == nil {
 			s.markRoomRemoved(admission)
 			removed++
@@ -516,26 +546,44 @@ func (s *Service) endedAdmissions(eventID string) ([]Admission, error) {
 	if !venue.usable() {
 		return nil, ErrVenueTimeUnavailable
 	}
-	ended := make([]Admission, 0)
+	// The sweep starts after the device the previous sweep attempted last
+	// and wraps around. Admissions that keep failing cannot hold every
+	// slot of every sweep.
+	cursor := s.sweepCursors[eventID]
+	after := make([]Admission, 0)
+	wrapped := make([]Admission, 0)
 	for _, admission := range s.cfg.Store.Admissions(eventID) {
 		if admission.RoomRemoved || venue.latest().Before(admission.ValidUntil) {
 			continue
 		}
-		ended = append(ended, admission)
-		if len(ended) == maxRemovalsPerSweep {
-			break
+		if admission.DeviceID > cursor {
+			after = append(after, admission)
+			continue
 		}
+		wrapped = append(wrapped, admission)
 	}
-	return ended, nil
+	ended := append(after, wrapped...)
+	return ended[:min(len(ended), maxRemovalsPerSweep)], nil
 }
 
-// isCurrentAdmission reports whether the stored admission for the device
-// is still the given one.
-func (s *Service) isCurrentAdmission(admission Admission) bool {
+func (s *Service) setSweepCursor(eventID, deviceID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepCursors[eventID] = deviceID
+}
+
+// beginRemoval starts a pending removal when the stored admission for
+// the device is still the given one. The check and the start share one
+// locked step, so no approval can slip in between.
+func (s *Service) beginRemoval(admission Admission) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	current, ok := s.cfg.Store.Admission(admission.EventID, admission.DeviceID)
-	return ok && current.ID == admission.ID
+	if !ok || current.ID != admission.ID {
+		return false
+	}
+	s.pendingRemovals[deviceKey{admission.EventID, admission.DeviceID}]++
+	return true
 }
 
 // markRoomRemoved records the removal on the ended admission. Staff may
