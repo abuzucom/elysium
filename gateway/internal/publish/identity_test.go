@@ -93,10 +93,12 @@ func TestDuplicateListenerIdentityDisconnectsEarlierSession(t *testing.T) {
 	case <-time.After(itDisconnectWait):
 		t.Fatalf("first session still connected %v after a duplicate join", itDisconnectWait)
 	}
+	// The second session must stay connected for a full interval, not
+	// only at one instant.
 	select {
 	case reason := <-secondReasons:
 		t.Fatalf("second session disconnected with reason %q, want it to stay", reason)
-	default:
+	case <-time.After(itPresenceWait):
 	}
 	waitForCount(t, observer, itListenerIdentity, 1)
 }
