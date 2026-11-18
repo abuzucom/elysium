@@ -846,3 +846,60 @@ func TestApproveWaitsForFailedExpiryRemoval(t *testing.T) {
 		t.Fatalf("approval after the retried removal: %v", err)
 	}
 }
+
+func TestFailedSweepRemovalBlocksApprovalWithoutGap(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	admission := f.admit(t, device)
+	f.clock.set(synchronizedAt(admission.ValidUntil))
+	f.rooms.setErr(errRoomService)
+	var gapErr error
+	// Right after the failed call, the venue clock steps back and staff
+	// try to approve the device again.
+	f.service.removalFinished = func() {
+		f.service.removalFinished = nil
+		f.clock.set(synchronizedAt(admission.ValidUntil.Add(-time.Hour)))
+		_, _, gapErr = f.requestAndApprove(t, device, testSource)
+	}
+	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); !errors.Is(err, errRoomService) {
+		t.Fatalf("sweep: error = %v, want the room service error", err)
+	}
+	if !errors.Is(gapErr, ErrRemovalPending) {
+		t.Fatalf("approval right after a failed removal: error = %v, want ErrRemovalPending", gapErr)
+	}
+}
+
+// nilMapRooms is a map type implementing RoomRemover. Its nil value must
+// not pass configuration validation.
+type nilMapRooms map[string]bool
+
+func (nilMapRooms) RemoveParticipant(context.Context, string, string) error { return nil }
+
+// nilFuncRooms is a func type implementing RoomRemover.
+type nilFuncRooms func(context.Context, string, string) error
+
+func (f nilFuncRooms) RemoveParticipant(ctx context.Context, room, identity string) error {
+	return f(ctx, room, identity)
+}
+
+func TestNewServiceRejectsTypedNilRoomsOfAnyKind(t *testing.T) {
+	var nilMap nilMapRooms
+	var nilFunc nilFuncRooms
+	for name, rooms := range map[string]RoomRemover{"map": nilMap, "func": nilFunc} {
+		clock := &fakeClock{}
+		_, err := NewService(Config{
+			Clock:            clock,
+			Monotonic:        clock.Monotonic,
+			SystemClock:      clock.System,
+			MaxClockOffset:   testMaxClockOffset,
+			Random:           zeroReader{},
+			Store:            NewMemoryStore(),
+			LiveKitAPIKey:    testAPIKey,
+			LiveKitAPISecret: testAPISecret,
+			Rooms:            rooms,
+		})
+		if !errors.Is(err, ErrInvalidArgument) {
+			t.Fatalf("nil %s remover: NewService error = %v, want ErrInvalidArgument", name, err)
+		}
+	}
+}

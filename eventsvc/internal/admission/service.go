@@ -60,15 +60,20 @@ type Config struct {
 	Rooms RoomRemover
 }
 
-// isNilRemover reports a nil remover, including a nil pointer wrapped in
-// the interface. A wrapped nil pointer would pass a plain nil check and
-// panic on the first removal.
+// isNilRemover reports a nil remover, including a nil value of any
+// nil-able kind wrapped in the interface. A wrapped nil would pass a
+// plain nil check and panic on the first removal.
 func isNilRemover(rooms RoomRemover) bool {
 	if rooms == nil {
 		return true
 	}
 	value := reflect.ValueOf(rooms)
-	return value.Kind() == reflect.Pointer && value.IsNil()
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func (cfg Config) validate() error {
@@ -130,7 +135,11 @@ type Service struct {
 	// once. If it overflows again, the sweep moves on, so failures that
 	// persist cannot block later admissions.
 	sweepHolds map[string]string
-	challenges map[string]challenge
+	// removalFinished, when set, runs after the sweep finishes one room
+	// removal and before it moves on. Only tests set it, to act in the
+	// window right after a removal call.
+	removalFinished func()
+	challenges      map[string]challenge
 	// eventChallenges counts outstanding challenges per event.
 	eventChallenges map[string]int
 }
@@ -551,15 +560,16 @@ func (s *Service) ExpireAdmissions(ctx context.Context, eventID string) (int, er
 		}
 		result.attempted++
 		err := s.cfg.Rooms.RemoveParticipant(ctx, eventID, item.admission.DeviceID)
-		s.endRemoval(eventID, item.admission.DeviceID)
+		s.finishRemoval(item.admission, err)
+		if s.removalFinished != nil {
+			s.removalFinished()
+		}
 		result.reached = i + 1
 		if err == nil {
-			s.markRoomRemoved(item.admission)
 			result.removed++
 			continue
 		}
 		result.failedAt[i] = true
-		s.markRemovalDue(item.admission)
 		if firstFailure == nil {
 			firstFailure = fmt.Errorf("remove device %s: %w", item.admission.DeviceID, err)
 		}
@@ -740,17 +750,28 @@ func (s *Service) finishSweep(eventID string, plan sweepPlan, result sweepResult
 	}
 }
 
-// markRemovalDue records a failed removal on the admission, matched by
-// ID, so the removal stays due and approval waits for it.
-func (s *Service) markRemovalDue(failed Admission) {
+// finishRemoval ends a sweep's pending removal and records its outcome
+// on the admission, matched by ID, in one locked step. A failure becomes
+// RemovalDue before the pending count drops, so no approval can slip in
+// between the failed call and the record that holds approval back.
+func (s *Service) finishRemoval(admission Admission, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	current, ok := s.cfg.Store.Admission(failed.EventID, failed.DeviceID)
-	if !ok || current.ID != failed.ID || current.RoomRemoved {
+	key := deviceKey{admission.EventID, admission.DeviceID}
+	if current, ok := s.cfg.Store.Admission(admission.EventID, admission.DeviceID); ok && current.ID == admission.ID {
+		if err == nil {
+			current.RoomRemoved = true
+		} else if !current.RoomRemoved {
+			current.RemovalDue = true
+		}
+		s.cfg.Store.PutAdmission(current)
+	}
+	remaining := s.pendingRemovals[key] - 1
+	if remaining <= 0 {
+		delete(s.pendingRemovals, key)
 		return
 	}
-	current.RemovalDue = true
-	s.cfg.Store.PutAdmission(current)
+	s.pendingRemovals[key] = remaining
 }
 
 // addRetryRemoval puts a device on the event's retry list when it has
