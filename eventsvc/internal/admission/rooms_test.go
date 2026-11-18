@@ -397,3 +397,33 @@ func TestExpireAdmissionsBoundsOneSweep(t *testing.T) {
 		t.Fatalf("second sweep: removed %d, error %v, want 1 and nil", removed, err)
 	}
 }
+
+func TestExpireAdmissionsKeepsReplacementWithSameTimestamps(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	expired := f.admit(t, device)
+	f.clock.set(synchronizedAt(expired.ValidUntil))
+	// The venue clock returns to the original approval instant, so the
+	// replacement carries the same approval and validity times.
+	f.rooms.setDuring(func() {
+		f.rooms.setDuring(nil)
+		f.clock.set(synchronizedAt(expired.ApprovedAt))
+		f.admitFrom(t, device, testSource, testEventID)
+	})
+	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); err != nil {
+		t.Fatalf("ExpireAdmissions: %v", err)
+	}
+	replacement, ok := f.service.cfg.Store.Admission(testEventID, expired.DeviceID)
+	if !ok {
+		t.Fatal("replacement admission missing")
+	}
+	if !replacement.ApprovedAt.Equal(expired.ApprovedAt) || !replacement.ValidUntil.Equal(expired.ValidUntil) {
+		t.Fatal("test setup: replacement timestamps differ from the expired admission")
+	}
+	if replacement.ID == expired.ID {
+		t.Fatal("replacement admission reuses the expired admission ID")
+	}
+	if replacement.RoomRemoved {
+		t.Fatal("expiry marked the replacement admission as removed")
+	}
+}

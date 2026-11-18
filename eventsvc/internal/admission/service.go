@@ -25,6 +25,8 @@ const (
 	maxCodeAttempts = 32
 	// challengeBytes is the random challenge length.
 	challengeBytes = 32
+	// admissionIDBytes is the random admission identifier length.
+	admissionIDBytes = 16
 )
 
 var codePattern = regexp.MustCompile(`^[0-9]{6}$`)
@@ -232,7 +234,12 @@ func (s *Service) Approve(eventID, code, approverID string) (Admission, error) {
 	if !venue.latest().Before(validUntil) {
 		return Admission{}, ErrAdmissionExpired
 	}
+	id, err := s.newAdmissionID()
+	if err != nil {
+		return Admission{}, err
+	}
 	admission := Admission{
+		ID:         id,
 		EventID:    eventID,
 		DeviceID:   request.DeviceID,
 		PublicKey:  request.PublicKey,
@@ -504,13 +511,13 @@ func (s *Service) endedAdmissions(eventID string) ([]Admission, error) {
 
 // markRoomRemoved records the removal on the ended admission. Staff may
 // approve the device again while the room service call is in flight. The
-// approval instant identifies the admission, so a replacement stays
-// unmarked and a later sweep handles it.
+// admission ID tells the two apart even when the venue clock repeats an
+// instant, so a replacement stays unmarked and a later sweep handles it.
 func (s *Service) markRoomRemoved(ended Admission) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	current, ok := s.cfg.Store.Admission(ended.EventID, ended.DeviceID)
-	if !ok || !current.ApprovedAt.Equal(ended.ApprovedAt) || !current.ValidUntil.Equal(ended.ValidUntil) {
+	if !ok || current.ID != ended.ID {
 		return
 	}
 	current.RoomRemoved = true
@@ -678,6 +685,16 @@ func (s *Service) openRequests(eventID string, now time.Duration) []Request {
 		open = append(open, request)
 	}
 	return open
+}
+
+// newAdmissionID draws a random admission identifier. The caller holds
+// the lock.
+func (s *Service) newAdmissionID() (string, error) {
+	value := make([]byte, admissionIDBytes)
+	if _, err := io.ReadFull(s.cfg.Random, value); err != nil {
+		return "", fmt.Errorf("read admission ID randomness: %w", err)
+	}
+	return hex.EncodeToString(value), nil
 }
 
 // uniqueCode draws a six-digit code that no open request uses.

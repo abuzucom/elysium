@@ -142,6 +142,9 @@ type Request struct {
 
 // Admission binds one device to one event.
 type Admission struct {
+	// ID identifies this admission among replacements for the same
+	// device and event.
+	ID         string
 	EventID    string
 	DeviceID   string
 	PublicKey  []byte
