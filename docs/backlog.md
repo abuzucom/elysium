@@ -236,7 +236,11 @@ These Gate 0 findings remain unverified.
   the removal on the admission. A failed removal is retried on the next
   call. A replacement admission approved during the call stays
   unmarked, so a later sweep still handles it. Each admission carries a
-  random 16-byte ID that tells replacements apart. One sweep handles at
+  random 16-byte ID that tells replacements apart. The sweep skips an
+  admission replaced before its call. LiveKit removes by identity only,
+  so a replacement approved during the call itself can still lose its
+  session. That needs the venue clock to step back past the admission
+  end during the call. One sweep handles at
   most 256 admissions. A timeout ends the sweep at once, because the
   room service is then likely unreachable. Other failures skip only
   that device. The error reports a failure count and the first failure. The server loop that calls it periodically does not exist yet.

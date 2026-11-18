@@ -46,6 +46,10 @@ func NewLiveKitRooms(serverURL, apiKey, apiSecret string, client *http.Client) (
 	switch {
 	case err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https"):
 		return nil, fmt.Errorf("%w: LiveKit server URL must be an http or https base URL", ErrInvalidArgument)
+	case parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "":
+		// A path prefix is allowed for a reverse proxy. Credentials, a
+		// query, or a fragment have no meaning in a base URL.
+		return nil, fmt.Errorf("%w: LiveKit server URL must not carry credentials, a query, or a fragment", ErrInvalidArgument)
 	case apiKey == "":
 		return nil, fmt.Errorf("%w: LiveKit API key is required", ErrInvalidArgument)
 	case len(apiSecret) < MinLiveKitSecretBytes:

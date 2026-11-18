@@ -10,6 +10,7 @@ import (
 	"io"
 	"math/big"
 	"net/netip"
+	"reflect"
 	"regexp"
 	"sync"
 	"time"
@@ -58,6 +59,17 @@ type Config struct {
 	Rooms RoomRemover
 }
 
+// isNilRemover reports a nil remover, including a nil pointer wrapped in
+// the interface. A wrapped nil pointer would pass a plain nil check and
+// panic on the first removal.
+func isNilRemover(rooms RoomRemover) bool {
+	if rooms == nil {
+		return true
+	}
+	value := reflect.ValueOf(rooms)
+	return value.Kind() == reflect.Pointer && value.IsNil()
+}
+
 func (cfg Config) validate() error {
 	switch {
 	case cfg.Clock == nil:
@@ -72,7 +84,7 @@ func (cfg Config) validate() error {
 		return fmt.Errorf("%w: random source is required", ErrInvalidArgument)
 	case cfg.Store == nil:
 		return fmt.Errorf("%w: store is required", ErrInvalidArgument)
-	case cfg.Rooms == nil:
+	case isNilRemover(cfg.Rooms):
 		return fmt.Errorf("%w: room remover is required", ErrInvalidArgument)
 	case cfg.LiveKitAPIKey == "":
 		return fmt.Errorf("%w: LiveKit API key is required", ErrInvalidArgument)
@@ -459,6 +471,14 @@ func (s *Service) ExpireAdmissions(ctx context.Context, eventID string) (int, er
 	var firstFailure error
 	// Room service calls run outside the lock, like Revoke.
 	for _, admission := range ended {
+		// Staff may have approved the device again since the sweep
+		// selected it. Skip it then, so the call cannot end the
+		// replacement's session. LiveKit removes by identity only, so a
+		// replacement approved during the call itself can still lose its
+		// session. A later sweep handles that admission once it ends.
+		if !s.isCurrentAdmission(admission) {
+			continue
+		}
 		attempted++
 		err := s.cfg.Rooms.RemoveParticipant(ctx, eventID, admission.DeviceID)
 		if err == nil {
@@ -507,6 +527,15 @@ func (s *Service) endedAdmissions(eventID string) ([]Admission, error) {
 		}
 	}
 	return ended, nil
+}
+
+// isCurrentAdmission reports whether the stored admission for the device
+// is still the given one.
+func (s *Service) isCurrentAdmission(admission Admission) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.cfg.Store.Admission(admission.EventID, admission.DeviceID)
+	return ok && current.ID == admission.ID
 }
 
 // markRoomRemoved records the removal on the ended admission. Staff may

@@ -427,3 +427,68 @@ func TestExpireAdmissionsKeepsReplacementWithSameTimestamps(t *testing.T) {
 		t.Fatal("expiry marked the replacement admission as removed")
 	}
 }
+
+func TestExpireAdmissionsSkipsAdmissionReplacedBeforeItsCall(t *testing.T) {
+	f := newFixture(t)
+	first, second := newTestDevice(t), newTestDevice(t)
+	sources := &sourceSequence{}
+	ended := []Admission{
+		f.admitFrom(t, first, sources.next(), testEventID),
+		f.admitFrom(t, second, sources.next(), testEventID),
+	}
+	devices := map[string]testDevice{ended[0].DeviceID: first, ended[1].DeviceID: second}
+	// The sweep handles admissions in device ID order.
+	if ended[1].DeviceID < ended[0].DeviceID {
+		ended[0], ended[1] = ended[1], ended[0]
+	}
+	beforeEnd := ended[0].ValidUntil.Add(-time.Hour)
+	f.clock.set(synchronizedAt(ended[0].ValidUntil))
+	// During the first removal call the clock steps back and staff
+	// approve the second device again.
+	f.rooms.setDuring(func() {
+		f.rooms.setDuring(nil)
+		f.clock.set(synchronizedAt(beforeEnd))
+		f.admitFrom(t, devices[ended[1].DeviceID], sources.next(), testEventID)
+	})
+	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); err != nil {
+		t.Fatalf("ExpireAdmissions: %v", err)
+	}
+	calls := f.rooms.take()
+	if len(calls) != 1 || calls[0].identity != ended[0].DeviceID {
+		t.Fatalf("removals = %v, want only %s", calls, ended[0].DeviceID)
+	}
+}
+
+func TestNewServiceRejectsTypedNilRooms(t *testing.T) {
+	clock := &fakeClock{}
+	var rooms *LiveKitRooms
+	_, err := NewService(Config{
+		Clock:            clock,
+		Monotonic:        clock.Monotonic,
+		SystemClock:      clock.System,
+		MaxClockOffset:   testMaxClockOffset,
+		Random:           zeroReader{},
+		Store:            NewMemoryStore(),
+		LiveKitAPIKey:    testAPIKey,
+		LiveKitAPISecret: testAPISecret,
+		Rooms:            rooms,
+	})
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("NewService error = %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestNewLiveKitRoomsRejectsAmbiguousURLs(t *testing.T) {
+	for _, serverURL := range []string{
+		"http://127.0.0.1:7880/?room=x",
+		"http://127.0.0.1:7880/#fragment",
+		"http://user:pass@127.0.0.1:7880",
+	} {
+		if _, err := NewLiveKitRooms(serverURL, testAPIKey, testAPISecret, http.DefaultClient); !errors.Is(err, ErrInvalidArgument) {
+			t.Fatalf("NewLiveKitRooms(%q) error = %v, want ErrInvalidArgument", serverURL, err)
+		}
+	}
+	if _, err := NewLiveKitRooms("https://proxy.example/livekit", testAPIKey, testAPISecret, http.DefaultClient); err != nil {
+		t.Fatalf("path prefix behind a proxy: %v", err)
+	}
+}
