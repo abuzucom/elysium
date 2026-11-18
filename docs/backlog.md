@@ -247,7 +247,9 @@ These Gate 0 findings remain unverified.
   through the LiveKit room service API and records the removal on the
   admission. The admission stays revoked when removal fails, and a
   repeated `Revoke` retries it. A repeated `Revoke` after a successful
-  removal makes no room call. `ExpireAdmissions` removes devices
+  removal makes no room call. After a failed revocation removal, approval
+  of the device waits with `ErrRemovalPending` until the removal
+  succeeds. The sweep retries it. `ExpireAdmissions` removes devices
   whose admission ended by the latest possible venue time and records
   the removal on the admission. A failed removal is retried on the next
   call. A replacement admission approved during the call stays
@@ -257,9 +259,16 @@ These Gate 0 findings remain unverified.
   so approval of a device waits with `ErrRemovalPending` while a
   removal call for it runs, from `Revoke` or the sweep. The request
   stays open, and staff approve it once the call ends.
-- A sweep first retries devices whose removal failed or was not reached
-  in the previous sweep, at most 128 of them. The rest of the sweep
-  continues from its cursor.
+- A sweep also removes revoked devices whose room removal has not
+  succeeded. It first handles a retry list of at most 128 devices, then
+  continues from its cursor. A device stays on the retry list until its
+  current admission is removed from the room, also when staff approve
+  it again in between. A valid replacement keeps its place on the list
+  until it ends or is revoked.
+- When more page devices fail than the retry list can keep, the cursor
+  holds back before the first one it could not keep, once. If that
+  device overflows again on the next sweep, the cursor moves on, so
+  persistent failures delay later admissions by at most one extra sweep.
 - One sweep reads one page of at most 256 admissions through
   `Store.AdmissionsAfter`, so its memory and work stay bounded however
   large the event grows. Each sweep starts after the previous page and

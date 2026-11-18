@@ -566,20 +566,22 @@ func TestExpireAdmissionsResumesAfterPreviousSweep(t *testing.T) {
 	for _, call := range f.rooms.take() {
 		attempted[call.identity] = true
 	}
-	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); !errors.Is(err, errRoomService) {
-		t.Fatalf("second sweep: error = %v, want the room service error", err)
-	}
-	// Retries of earlier failures come first. The sweep must still reach
-	// the admission the first sweep never reached.
-	second := f.rooms.take()
+	// Retries of earlier failures come first, and the cursor holds back
+	// once for failures the retry list cannot keep. Within two more sweeps
+	// the sweep must still reach the admission the first never reached.
 	reached := false
-	for _, call := range second {
-		if !attempted[call.identity] {
-			reached = true
+	for sweep := 2; sweep <= 3 && !reached; sweep++ {
+		if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); !errors.Is(err, errRoomService) {
+			t.Fatalf("sweep %d: error = %v, want the room service error", sweep, err)
+		}
+		for _, call := range f.rooms.take() {
+			if !attempted[call.identity] {
+				reached = true
+			}
 		}
 	}
 	if !reached {
-		t.Fatalf("second sweep made %d calls, none for the admission the first sweep never reached", len(second))
+		t.Fatal("sweeps 2 and 3 made no call for the admission the first sweep never reached")
 	}
 }
 
@@ -716,4 +718,97 @@ func TestExpireAdmissionsRetriesFailedRemovalFirst(t *testing.T) {
 	if len(calls) > maxRemovalsPerSweep {
 		t.Fatalf("second sweep made %d calls, want at most %d", len(calls), maxRemovalsPerSweep)
 	}
+}
+
+// sortedAdmissions returns the admissions in device ID order, the order
+// the sweep reads them.
+func sortedAdmissions(admissions []Admission) []Admission {
+	sorted := slices.Clone(admissions)
+	slices.SortFunc(sorted, func(a, b Admission) int { return strings.Compare(a.DeviceID, b.DeviceID) })
+	return sorted
+}
+
+func TestExpireAdmissionsKeepsRetryForReplacement(t *testing.T) {
+	f := newFixture(t)
+	devices := make(map[string]testDevice)
+	sources := &sourceSequence{}
+	admissions := make([]Admission, 0, maxRemovalsPerSweep+10)
+	for range maxRemovalsPerSweep + 10 {
+		device := newTestDevice(t)
+		admission := f.admitFrom(t, device, sources.next(), testEventID)
+		devices[admission.DeviceID] = device
+		admissions = append(admissions, admission)
+	}
+	sorted := sortedAdmissions(admissions)
+	failing := sorted[0].DeviceID
+	end := sorted[0].ValidUntil
+	f.clock.set(synchronizedAt(end))
+	f.rooms.setFailing(failing, true)
+	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); !errors.Is(err, errRoomService) {
+		t.Fatalf("first sweep: error = %v, want the room service error", err)
+	}
+	f.rooms.setFailing(failing, false)
+	// The venue clock steps back and staff approve the failed device again.
+	f.clock.set(synchronizedAt(end.Add(-time.Hour)))
+	f.admitFrom(t, devices[failing], sources.next(), testEventID)
+	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	f.rooms.take()
+	// Once the replacement ends, its device is retried first.
+	f.clock.set(synchronizedAt(end))
+	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); err != nil {
+		t.Fatalf("third sweep: %v", err)
+	}
+	calls := f.rooms.take()
+	if len(calls) == 0 || calls[0].identity != failing {
+		t.Fatalf("third sweep starts with %v, want the retried device %s", calls[:min(1, len(calls))], failing)
+	}
+}
+
+func TestApproveWaitsForFailedRevokeRemoval(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	admission := f.admit(t, device)
+	f.rooms.setErr(errRoomService)
+	if err := f.service.Revoke(context.Background(), testEventID, admission.DeviceID, admission.ID); !errors.Is(err, errRoomService) {
+		t.Fatalf("Revoke: error = %v, want the room service error", err)
+	}
+	receipt, _, err := f.requestAndApprove(t, device, testSource)
+	if !errors.Is(err, ErrRemovalPending) {
+		t.Fatalf("approval after a failed removal: error = %v, want ErrRemovalPending", err)
+	}
+	f.rooms.setErr(nil)
+	f.rooms.take()
+	// The sweep retries the failed revocation removal.
+	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); err != nil {
+		t.Fatalf("ExpireAdmissions: %v", err)
+	}
+	if calls := f.rooms.take(); len(calls) != 1 || calls[0].identity != admission.DeviceID {
+		t.Fatalf("sweep removals = %v, want the revoked device", calls)
+	}
+	if _, err := f.service.Approve(testEventID, receipt.Code, testApprover); err != nil {
+		t.Fatalf("approval after the retried removal: %v", err)
+	}
+}
+
+func TestExpireAdmissionsHoldsCursorForRetryOverflow(t *testing.T) {
+	f := newFixture(t)
+	sorted := sortedAdmissions(f.admitMany(t, maxRemovalsPerSweep+10))
+	f.clock.set(synchronizedAt(sorted[0].ValidUntil))
+	f.rooms.setErr(errRoomService)
+	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); !errors.Is(err, errRoomService) {
+		t.Fatalf("first sweep: error = %v, want the room service error", err)
+	}
+	f.rooms.take()
+	if _, err := f.service.ExpireAdmissions(context.Background(), testEventID); !errors.Is(err, errRoomService) {
+		t.Fatalf("second sweep: error = %v, want the room service error", err)
+	}
+	firstDropped := sorted[maxRetriesPerSweep].DeviceID
+	for _, call := range f.rooms.take() {
+		if call.identity == firstDropped {
+			return
+		}
+	}
+	t.Fatalf("second sweep skipped %s, the first failure the retry list could not hold", firstDropped)
 }
