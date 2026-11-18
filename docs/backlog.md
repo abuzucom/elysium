@@ -185,6 +185,11 @@ These Gate 0 findings remain unverified.
   rejections, pool cap rejections, and unknown or malformed events do
   not count. An address past the budget is refused before signature
   verification.
+- A device over its quota is refused before signature verification. The
+  check reads the quota without charging it. The device quota and the
+  nonce are charged only once a challenge is issued. A pool cap
+  rejection costs the device nothing and leaves the signed request
+  valid for a retry.
 - Challenge request nonces hold 16 bytes. The service rejects a reused
   nonce for 60 seconds after first use. A replay captured from the
   transport after that window spends one slot of the device quota. The

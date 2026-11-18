@@ -280,42 +280,48 @@ func (s *Service) Challenge(source netip.Addr, request ChallengeRequest) ([]byte
 	if s.challengeFailures.blocked(source, now) {
 		return nil, ErrChallengeFailures
 	}
-	deviceID, err := s.authorizeChallenge(request, now)
-	if err != nil {
+	// The key size check bounds the hashing below. A failure charges
+	// the address like any other invalid request.
+	if len(request.PublicKey) == 0 || len(request.PublicKey) > maxPublicKeyBytes {
+		s.challengeFailures.record(source, now)
+		return nil, fmt.Errorf("%w: public key size %d", ErrInvalidArgument, len(request.PublicKey))
+	}
+	deviceID := DeviceID(request.PublicKey)
+	// A device over its quota is refused before signature work. The
+	// check records nothing, so a sender cannot spend another device's
+	// quota by naming its key. It does not charge the address either,
+	// so an admitted device cannot lock out its neighbors.
+	if s.deviceChallenges.blocked(deviceID, now) {
+		return nil, ErrChallengeRateLimited
+	}
+	if err := s.authorizeChallenge(request, deviceID, now); err != nil {
 		s.challengeFailures.record(source, now)
 		return nil, err
 	}
-	// A device over its own quota does not charge the address. An
-	// admitted device cannot lock out its neighbors that way.
-	if !s.deviceChallenges.allow(deviceID, now) {
-		return nil, ErrChallengeRateLimited
-	}
-	s.rememberNonce(deviceID, request.Nonce, now)
-	return s.issueChallenge(request.EventID, now)
+	return s.issueChallenge(request.EventID, deviceID, request.Nonce, now)
 }
 
-// authorizeChallenge verifies a signed challenge request and returns the
-// device identifier of an admitted, unrevoked device.
-func (s *Service) authorizeChallenge(request ChallengeRequest, now time.Duration) (string, error) {
+// authorizeChallenge verifies a signed challenge request from an
+// admitted, unrevoked device.
+func (s *Service) authorizeChallenge(request ChallengeRequest, deviceID string, now time.Duration) error {
 	if len(request.Nonce) != ChallengeNonceBytes {
-		return "", fmt.Errorf("%w: nonce must hold %d bytes", ErrInvalidArgument, ChallengeNonceBytes)
+		return fmt.Errorf("%w: nonce must hold %d bytes", ErrInvalidArgument, ChallengeNonceBytes)
 	}
 	message := ChallengeRequestMessage(request.EventID, request.PublicKey, request.Nonce)
 	if err := verifyDevice(request.PublicKey, message, request.Signature); err != nil {
-		return "", err
+		return err
 	}
-	deviceID := DeviceID(request.PublicKey)
 	if s.nonceSeen(deviceID, request.Nonce, now) {
-		return "", ErrChallengeReplayed
+		return ErrChallengeReplayed
 	}
 	admission, ok := s.cfg.Store.Admission(request.EventID, deviceID)
 	if !ok || !bytes.Equal(admission.PublicKey, request.PublicKey) {
-		return "", ErrNoAdmission
+		return ErrNoAdmission
 	}
 	if admission.Revoked {
-		return "", ErrRevoked
+		return ErrRevoked
 	}
-	return deviceID, nil
+	return nil
 }
 
 // nonceKey identifies one challenge request nonce of one device.
@@ -353,8 +359,11 @@ func (s *Service) rememberNonce(deviceID string, nonce []byte, now time.Duration
 	s.nonces[newNonceKey(deviceID, nonce)] = now + ChallengeRateWindow
 }
 
-// issueChallenge draws and stores a challenge within the pool caps.
-func (s *Service) issueChallenge(eventID string, now time.Duration) ([]byte, error) {
+// issueChallenge draws and stores a challenge within the pool caps. The
+// device quota and the nonce are charged only once the challenge exists.
+// A pool cap rejection therefore costs the device nothing and leaves the
+// signed request valid for a retry.
+func (s *Service) issueChallenge(eventID, deviceID string, nonce []byte, now time.Duration) ([]byte, error) {
 	s.sweepChallenges(now)
 	if len(s.challenges) >= MaxOutstandingChallenges || s.eventChallenges[eventID] >= MaxEventChallenges {
 		return nil, ErrTooManyChallenges
@@ -363,6 +372,8 @@ func (s *Service) issueChallenge(eventID string, now time.Duration) ([]byte, err
 	if _, err := io.ReadFull(s.cfg.Random, value); err != nil {
 		return nil, fmt.Errorf("read challenge randomness: %w", err)
 	}
+	s.deviceChallenges.record(deviceID, now)
+	s.rememberNonce(deviceID, nonce, now)
 	s.challenges[hex.EncodeToString(value)] = challenge{eventID: eventID, expiresAt: now + ChallengeLifetime}
 	s.eventChallenges[eventID]++
 	return value, nil

@@ -402,3 +402,54 @@ func TestChallengeAccountingMatchesLiveChallenges(t *testing.T) {
 		t.Fatalf("event-2 counter survived the sweep")
 	}
 }
+
+func TestPoolCapRejectionKeepsDeviceQuotaAndNonce(t *testing.T) {
+	f := newFixture(t)
+	sources := &sourceSequence{}
+	filler := newTestDevice(t)
+	f.admitFrom(t, filler, sources.next(), testEventID)
+	freeable, err := f.challenge(t, filler, testSource, testEventID)
+	if err != nil {
+		t.Fatalf("filler challenge: %v", err)
+	}
+	f.fillChallenges(t, testEventID, MaxEventChallenges-1, sources)
+	device := newTestDevice(t)
+	f.admitFrom(t, device, sources.next(), testEventID)
+	requests := make([]ChallengeRequest, ChallengeRateLimit)
+	for i := range requests {
+		requests[i] = device.challengeRequest(t, testEventID)
+		if _, err := f.service.Challenge(testSource, requests[i]); !errors.Is(err, ErrTooManyChallenges) {
+			t.Fatalf("request %d at the pool cap: error = %v, want ErrTooManyChallenges", i, err)
+		}
+	}
+	if _, err := f.service.IssueToken(filler.tokenRequest(t, testEventID, freeable)); err != nil {
+		t.Fatalf("IssueToken to free a slot: %v", err)
+	}
+	if _, err := f.service.Challenge(testSource, requests[0]); err != nil {
+		t.Fatalf("retry of a request refused at the pool cap: %v", err)
+	}
+}
+
+func TestOverQuotaDeviceSkipsSignatureVerification(t *testing.T) {
+	f := newFixture(t)
+	device := newTestDevice(t)
+	neighbor := newTestDevice(t)
+	sources := &sourceSequence{}
+	f.admitFrom(t, device, sources.next(), testEventID)
+	f.admitFrom(t, neighbor, sources.next(), testEventID)
+	for i := range ChallengeRateLimit {
+		if _, err := f.challenge(t, device, testSource, testEventID); err != nil {
+			t.Fatalf("challenge %d: %v", i, err)
+		}
+	}
+	for i := range 2 * ChallengeFailureLimit {
+		request := device.challengeRequest(t, testEventID)
+		request.Signature = []byte{0x30, 0x00}
+		if _, err := f.service.Challenge(testSource, request); !errors.Is(err, ErrChallengeRateLimited) {
+			t.Fatalf("over-quota request %d: error = %v, want ErrChallengeRateLimited before verification", i, err)
+		}
+	}
+	if _, err := f.challenge(t, neighbor, testSource, testEventID); err != nil {
+		t.Fatalf("neighbor on the shared address: %v", err)
+	}
+}
