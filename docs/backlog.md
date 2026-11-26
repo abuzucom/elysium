@@ -273,8 +273,9 @@ These Gate 0 findings remain unverified.
   holds back before the first one it could not keep, once. If that
   device overflows again on the next sweep, the cursor moves on, so
   persistent failures delay later admissions by at most one extra sweep.
-- One sweep reads one page of at most 256 admissions through
-  `Store.AdmissionsAfter`, so its memory and work stay bounded however
+- One sweep reads at most 256 admissions through
+  `Store.AdmissionsAfter`, in up to two store reads when it wraps around
+  to the start of the event. Its memory and work stay bounded however
   large the event grows. Each sweep starts after the previous page and
   wraps around, so admissions that keep failing cannot block later
   ones. A timeout ends the sweep at once, because the room service is

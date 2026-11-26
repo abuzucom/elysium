@@ -630,13 +630,14 @@ func (s *countingStore) takeRead() int {
 	return read
 }
 
-func TestExpireAdmissionsReadsOnePagePerSweep(t *testing.T) {
+func TestExpireAdmissionsReadsBoundedAdmissionsPerSweep(t *testing.T) {
 	store := &countingStore{MemoryStore: NewMemoryStore()}
 	f := newFixtureWith(t, rand.Reader, store)
 	admissions := f.admitMany(t, maxRemovalsPerSweep+50)
 	store.takeRead()
 	// No admission has ended yet, so the sweep finds nothing to remove,
-	// but it must still read only one page.
+	// but it must still read at most maxRemovalsPerSweep admissions. A
+	// wrapping sweep may split them over two store reads.
 	if removed, err := f.service.ExpireAdmissions(context.Background(), testEventID); err != nil || removed != 0 {
 		t.Fatalf("removed %d, error %v, want 0 and nil", removed, err)
 	}

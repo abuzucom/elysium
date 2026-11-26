@@ -536,8 +536,9 @@ const maxRetriesPerSweep = maxRemovalsPerSweep / 2
 // number of devices removed. The server loop calls it periodically for
 // each event.
 //
-// A sweep first handles the event's retry list, then reads one page from
-// its cursor. A device stays on the retry list until its current
+// A sweep first handles the event's retry list, then reads at most
+// maxRemovalsPerSweep admissions from its cursor, in up to two store reads
+// when it wraps around. A device stays on the retry list until its current
 // admission is removed from the room, even across a replacement. One call
 // makes at most maxRemovalsPerSweep room calls. A timeout or a cancelled
 // context ends the sweep at once, because the room service is then likely
@@ -637,9 +638,11 @@ func removalOwed(admission Admission) bool {
 
 // planSweep selects the admissions of one sweep. Retry devices come
 // first, at most maxRetriesPerSweep, resolved against their current
-// admission. One page of the store after the cursor fills the rest and
-// wraps around once. The page bounds the work of one sweep however large
-// the event grows.
+// admission. Admissions after the cursor fill the rest, and a second store
+// read wraps around to the start of the event when the first comes up
+// short. Together the reads return at most maxRemovalsPerSweep
+// admissions, which bounds the work of one sweep however large the event
+// grows.
 func (s *Service) planSweep(eventID string) (sweepPlan, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
