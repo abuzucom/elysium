@@ -5,6 +5,7 @@ go 1.26.8
 require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/livekit/protocol v1.51.1-0.20260910121219-271d9cde3897
+	github.com/twitchtv/twirp v8.1.3+incompatible
 )
 
 require (
@@ -56,7 +57,6 @@ require (
 	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/puzpuzpuz/xsync/v4 v4.5.0 // indirect
 	github.com/redis/go-redis/v9 v9.22.0 // indirect
-	github.com/twitchtv/twirp v8.1.3+incompatible // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.opentelemetry.io/otel v1.44.0 // indirect

@@ -237,11 +237,59 @@ These Gate 0 findings remain unverified.
   `MaxClockOffset` of venue UTC for every token lifetime. The value must
   stay below the 60-second minimum token lifetime. The deployment value
   and how the controller disciplines its system clock remain open.
-- Planned by human decision (2026-11-16): the event service removes a
+- Decided by the active human (2026-11-16): the event service removes a
   participant from the LiveKit room when its admission ends or is
   revoked. Room removal enforces the admission end even when the
-  controller clock leaves its bound. It needs the LiveKit room service
-  API in a later increment.
+  controller clock leaves its bound.
+- `Revoke` takes the admission ID and refuses with `ErrAdmissionChanged`
+  when the device holds a different admission, so a stale decision
+  cannot revoke a replacement. It removes the device from the event room
+  through the LiveKit room service API and records the removal on the
+  admission. The admission stays revoked when removal fails, and a
+  repeated `Revoke` retries it. A repeated `Revoke` after a successful
+  removal makes no room call. After a failed revocation removal, approval
+  of the device waits with `ErrRemovalPending` until the removal
+  succeeds. The sweep retries it. `ExpireAdmissions` removes devices
+  whose admission ended by the latest possible venue time and records
+  the removal on the admission. A failed removal is retried on the next
+  call. A replacement admission approved during the call stays
+  unmarked, so a later sweep still handles it. Each admission carries a
+  random 16-byte ID that tells replacements apart. The sweep skips an
+  admission replaced before its call. LiveKit removes by identity only,
+  so approval of a device waits with `ErrRemovalPending` while a
+  removal call for it runs, from `Revoke` or the sweep. The request
+  stays open, and staff approve it once the call ends.
+- A failed expiry removal is recorded on the admission (`RemovalDue`).
+  Like a failed revocation removal, it holds approval of the device
+  back with `ErrRemovalPending` until a removal succeeds, even if the
+  venue clock steps back before the admission end.
+- A sweep also removes revoked devices, and devices with a due removal,
+  whose room removal has not succeeded. It first handles a retry list of at most 128 devices, then
+  continues from its cursor. A device stays on the retry list until its
+  current admission is removed from the room, also when staff approve
+  it again in between. A valid replacement keeps its place on the list
+  until it ends or is revoked.
+- When more page devices fail than the retry list can keep, the cursor
+  holds back before the first one it could not keep, once. If that
+  device overflows again on the next sweep, the cursor moves on, so
+  persistent failures delay later admissions by at most one extra sweep.
+- One sweep reads at most 256 admissions through
+  `Store.AdmissionsAfter`, in up to two store reads when it wraps around
+  to the start of the event. Its memory and work stay bounded however
+  large the event grows. Each sweep starts after the previous page and
+  wraps around, so admissions that keep failing cannot block later
+  ones. A timeout ends the sweep at once, because the room service is
+  then likely unreachable, and the next sweep continues after the last
+  device attempted. Other failures skip only that device. The error
+  reports a failure count and the first failure. The server loop that
+  calls the sweep periodically does not exist yet.
+- Room service calls use a room admin token scoped to one room with a
+  60-second lifetime. LiveKit checks it against the controller system
+  clock. Each call times out after 10 seconds whatever the caller's
+  context allows. The room service URL must use https unless LiveKit
+  runs on the controller's loopback interface. Removing an absent participant counts as success. Checked
+  against LiveKit v1.13.11: an absent participant returns not found,
+  and a wrong secret returns unauthenticated.
 - Token issuance accepts only a usable venue estimate. The gateway
   `venuetime` service needs an adapter to the `VenueClock` interface.
 - Open in later increments: the HTTP API, invitation enrollment with

@@ -13,6 +13,10 @@ type Store interface {
 	PutRequest(request Request)
 	DeleteRequest(eventID, deviceID string)
 	Admission(eventID, deviceID string) (Admission, bool)
+	// AdmissionsAfter returns at most limit admissions for one event whose
+	// device identifier sorts after afterDeviceID, in device identifier
+	// order. An empty afterDeviceID starts at the first admission.
+	AdmissionsAfter(eventID, afterDeviceID string, limit int) []Admission
 	PutAdmission(admission Admission)
 }
 
@@ -29,14 +33,18 @@ type MemoryStore struct {
 	// touches only one event's requests.
 	requests   map[string]map[string]Request
 	admissions map[deviceKey]Admission
+	// admissionOrder keeps each event's device identifiers sorted, so a
+	// paged read touches only its own page.
+	admissionOrder map[string][]string
 }
 
 // NewMemoryStore returns an empty in-memory store.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		events:     make(map[string]Event),
-		requests:   make(map[string]map[string]Request),
-		admissions: make(map[deviceKey]Admission),
+		events:         make(map[string]Event),
+		requests:       make(map[string]map[string]Request),
+		admissions:     make(map[deviceKey]Admission),
+		admissionOrder: make(map[string][]string),
 	}
 }
 
@@ -89,10 +97,34 @@ func (s *MemoryStore) Admission(eventID, deviceID string) (Admission, bool) {
 	return admission, ok
 }
 
+// AdmissionsAfter returns at most limit admissions for one event whose
+// device identifier sorts after afterDeviceID.
+func (s *MemoryStore) AdmissionsAfter(eventID, afterDeviceID string, limit int) []Admission {
+	order := s.admissionOrder[eventID]
+	first, found := slices.BinarySearch(order, afterDeviceID)
+	if found {
+		first++
+	}
+	last := min(len(order), first+max(limit, 0))
+	page := make([]Admission, 0, last-first)
+	for _, deviceID := range order[first:last] {
+		admission := s.admissions[deviceKey{eventID, deviceID}]
+		admission.PublicKey = slices.Clone(admission.PublicKey)
+		page = append(page, admission)
+	}
+	return page
+}
+
 // PutAdmission stores an admission, replacing the device's earlier one.
 func (s *MemoryStore) PutAdmission(admission Admission) {
 	admission.PublicKey = slices.Clone(admission.PublicKey)
-	s.admissions[deviceKey{admission.EventID, admission.DeviceID}] = admission
+	key := deviceKey{admission.EventID, admission.DeviceID}
+	if _, exists := s.admissions[key]; !exists {
+		order := s.admissionOrder[admission.EventID]
+		at, _ := slices.BinarySearch(order, admission.DeviceID)
+		s.admissionOrder[admission.EventID] = slices.Insert(order, at, admission.DeviceID)
+	}
+	s.admissions[key] = admission
 }
 
 // cloneEvent copies the grace value so stored events share no mutable
